@@ -31,6 +31,7 @@ public partial class MainWindow : Window
             SearchBox.SelectAll();
         }));
         DataContextChanged += OnDataContextChanged;
+        Loaded += OnLoaded;
     }
 
     protected override void OnClosing(CancelEventArgs e)
@@ -213,6 +214,57 @@ public partial class MainWindow : Window
         menu.Items.Add(new MenuItem { Header = "Reload presets file", Command = _vm.ReloadPresetsCommand, ToolTip = _vm.PresetsPath });
 
         menu.IsOpen = true;
+    }
+
+    private void OnUpdatesClick(object sender, RoutedEventArgs e)
+    {
+        if (_vm is null)
+        {
+            return;
+        }
+
+        var updates = _vm.Updates;
+        var menu = new ContextMenu
+        {
+            PlacementTarget = UpdatesButton,
+            Placement = PlacementMode.Bottom,
+        };
+
+        menu.Items.Add(SectionHeader($"CryptoFixer {updates.CurrentVersion}"));
+        if (updates.AvailableRelease is { } release)
+        {
+            menu.Items.Add(new MenuItem { Header = $"Install CryptoFixer {release.Version}…", Command = updates.InstallCommand, FontWeight = FontWeights.SemiBold });
+        }
+
+        menu.Items.Add(new MenuItem { Header = "Check for updates now", Command = updates.CheckNowCommand });
+        var atStartup = new MenuItem
+        {
+            Header = "Check for updates at startup",
+            IsCheckable = true,
+            IsChecked = _vm.CheckForUpdatesAtStartup,
+            ToolTip = $"Stored as \"checkForUpdates\" in {_vm.SettingsPath}",
+        };
+        atStartup.Click += (_, _) => _vm.CheckForUpdatesAtStartup = atStartup.IsChecked;
+        menu.Items.Add(atStartup);
+        menu.Items.Add(new Separator());
+        menu.Items.Add(new MenuItem { Header = "Open releases page", Command = updates.OpenReleasesPageCommand, ToolTip = updates.ReleasesPage.AbsoluteUri });
+
+        menu.IsOpen = true;
+    }
+
+    private async void OnLoaded(object sender, RoutedEventArgs e)
+    {
+        if (_vm is not { CheckForUpdatesAtStartup: true } vm)
+        {
+            return;
+        }
+
+        // Let the window finish drawing first; the check runs in the background and only updates the header.
+        await Task.Delay(TimeSpan.FromSeconds(1.5));
+        if (vm.CheckForUpdatesAtStartup)
+        {
+            await vm.Updates.CheckAsync(userInitiated: false);
+        }
     }
 
     private static MenuItem PresetItem(ProtocolPreset preset, ICommand stage)

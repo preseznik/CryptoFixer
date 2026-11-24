@@ -37,6 +37,20 @@ public class AppSettingsTests
         Assert.Equal(!isError, result.Warnings.Count == 1);
     }
 
+    [Theory]
+    [InlineData("""{ "checkForUpdates": false }""", false, 0)]
+    [InlineData("""{ "CHECKFORUPDATES": true }""", true, 0)]
+    [InlineData("""{ "displayMode": "list" }""", true, 0)]
+    [InlineData("""{ "checkForUpdates": "no" }""", true, 1)]
+    public void Parse_reads_the_update_check_switch(string json, bool expected, int warnings)
+    {
+        var result = AppSettingsFile.Parse(json);
+
+        Assert.Null(result.Error);
+        Assert.Equal(warnings, result.Warnings.Count);
+        Assert.Equal(expected, result.Settings.CheckForUpdates);
+    }
+
     [Fact]
     public void Save_and_load_round_trip_on_disk()
     {
@@ -48,13 +62,15 @@ public class AppSettingsTests
             Assert.Equal(AppSettingsLoadResult.Missing, AppSettingsFile.Load(path));
 
             AppSettingsFile.Save(path, new AppSettings { DisplayMode = TableDisplayMode.List });
-            AppSettingsFile.Save(path, new AppSettings { DisplayMode = TableDisplayMode.Compact });
+            AppSettingsFile.Save(path, new AppSettings { DisplayMode = TableDisplayMode.Compact, CheckForUpdates = false });
 
             var loaded = AppSettingsFile.Load(path);
             Assert.True(loaded.FileExists);
             Assert.Null(loaded.Error);
             Assert.Equal(TableDisplayMode.Compact, loaded.Settings.DisplayMode);
+            Assert.False(loaded.Settings.CheckForUpdates);
             Assert.Contains("\"displayMode\": \"compact\"", File.ReadAllText(path));
+            Assert.Contains("\"checkForUpdates\": false", File.ReadAllText(path));
             Assert.Equal([AppSettingsFile.FileName], Directory.GetFiles(folder).Select(Path.GetFileName));
         }
         finally

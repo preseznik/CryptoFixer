@@ -12,6 +12,8 @@ HKLM\SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL\Protocols\<Prot
 
 Protocols covered: PCT 1.0, Multi-Protocol Unified Hello, SSL 2.0, SSL 3.0, TLS 1.0, TLS 1.1, TLS 1.2, TLS 1.3, DTLS 1.0, DTLS 1.2.
 
+**Download:** get `CryptoFixer-win-x64.exe` (or the zip) from the [latest release](https://github.com/preseznik/CryptoFixer/releases/latest). It is a single self-contained exe: no installer and no .NET runtime needed. The exe isn't code-signed, so Windows SmartScreen may warn the first time you run it (*More info* → *Run anyway*). You can check the download against the `.sha256` file published with the release.
+
 ![Main window, standard view, with the Modern preset staged](docs/screenshot.png)
 
 | Compact view | List view |
@@ -134,9 +136,9 @@ CryptoFixer keeps its own files next to `CryptoFixer.exe` (resolved from the exe
 | File | Contents | Created |
 |---|---|---|
 | `CryptoFixer.presets.json` | Your saved presets | When you save the first preset, or with *Create presets file…* |
-| `CryptoFixer.settings.json` | `{ "formatVersion": 1, "displayMode": "standard" \| "compact" \| "list" }` | When you change the display mode |
+| `CryptoFixer.settings.json` | `{ "formatVersion": 1, "displayMode": "standard" \| "compact" \| "list", "checkForUpdates": true \| false }` | When you change the display mode or the update check setting |
 
-A missing file means "no presets" or "default settings". A corrupt settings file is reported in the status line, and the app uses the Standard view without overwriting the file until you change the mode. The folder must be writable for saving. If it isn't, the app tells you and keeps working.
+A missing file means "no presets" or "default settings". A corrupt settings file is reported in the status line, and the app uses the defaults (Standard view, update check on) without overwriting the file until you change a setting. The folder must be writable for saving. If it isn't, the app tells you and keeps working.
 
 ### Restoring a backup
 
@@ -153,6 +155,23 @@ Then restart Windows.
 Start with `--read-only` (or `/readonly`) to view the configuration without allowing changes, even when elevated. The app also opens read-only when it runs without administrator rights. In read-only mode the registry layer itself refuses writes.
 
 You can still stage settings and presets to preview their effect, and you can save presets. **Apply changes…** and the restart prompt are disabled.
+
+### Updates
+
+CryptoFixer updates itself from the [public releases of this repository](https://github.com/preseznik/CryptoFixer/releases). The header shows the running version and the result of the last update check; **Updates ▾** has *Check for updates now*, *Check for updates at startup* and *Open releases page*.
+
+- **Startup check.** A couple of seconds after start, the app asks the GitHub API (`https://api.github.com/repos/preseznik/CryptoFixer/releases/latest`, unauthenticated, through the system proxy) for the latest release. It runs in the background and never blocks the window. Being offline, a GitHub rate limit or a missing release only changes the text next to the version; hover over it for details. Drafts and prereleases are never offered.
+- **Turning it off.** Untick *Updates ▾ › Check for updates at startup*, or set `"checkForUpdates": false` in `CryptoFixer.settings.json` next to the exe. *Check for updates now* still works.
+- **Installing.** When a newer version exists, a blue bar offers it. *Update now…* shows the release notes, then:
+  1. downloads `CryptoFixer-win-x64.exe` from the release into `%TEMP%\CryptoFixer-update\`,
+  2. checks its SHA-256 hash against the release's `.sha256` file and refuses to install on a mismatch (it also checks that the file reports the release's version),
+  3. renames the running `CryptoFixer.exe` to `CryptoFixer.exe.old`, moves the new exe into place and restarts with the same command-line arguments and elevation,
+  4. deletes `CryptoFixer.exe.old` on the next start and reports "Updated from X to Y" in the status line.
+
+  If anything fails before the new exe is in place, the old version is kept (or put back). `CryptoFixer.presets.json` and `CryptoFixer.settings.json` are never touched. Staged changes that weren't applied are discarded by the restart; the dialog warns about them.
+- **When it can't update itself**, for example when the exe's folder isn't writable (such as `Program Files` without elevation) or you run a development build, the dialog offers the release page instead so you can replace the exe by hand.
+- **Trust.** The SHA-256 check protects against corrupted or incomplete downloads. It is not a signature: both files come from the same GitHub release, so it can't detect a compromised release. The exe isn't code-signed, which is also why SmartScreen may warn about it.
+- Updating works in read-only mode too. It never changes the Schannel registry settings.
 
 ## OS defaults
 
@@ -201,6 +220,7 @@ The tests use an in-memory registry fake, a temporary `HKCU\Software\CryptoFixer
 .\scripts\publish.ps1              # version from Directory.Build.props, win-x64
 .\scripts\publish.ps1 -SmokeTest   # also starts the packaged exe read-only and closes it again
 .\scripts\publish.ps1 -Version 1.1.0 -Runtime win-arm64 -SkipTests
+.\scripts\publish.ps1 -OutputDir C:\Temp\cf-build   # package somewhere other than dist\
 ```
 
 The script:
@@ -214,7 +234,8 @@ The script:
 |---|---|
 | `dist\CryptoFixer-<version>-<runtime>\` | `CryptoFixer.exe` (about 59 MB), `README.md` and `docs\` screenshots |
 | `dist\CryptoFixer-<version>-<runtime>.zip` | the folder above, zipped |
-| `dist\CryptoFixer-<version>-<runtime>.sha256` | SHA-256 hashes of the exe and the zip (`sha256sum` format) |
+| `dist\CryptoFixer-<runtime>.exe` | the same exe under the unversioned name the in-app updater downloads |
+| `dist\CryptoFixer-<version>-<runtime>.sha256` | SHA-256 hashes of both exes and the zip (`sha256sum` format); the updater verifies against it |
 
 The `.pdb` symbol files stay in `artifacts\publish\<runtime>\`. The equivalent manual command is:
 
@@ -223,9 +244,22 @@ dotnet publish src\CryptoFixer\CryptoFixer.csproj -c Release -r win-x64 --self-c
   '-p:PublishSingleFile=true' '-p:IncludeNativeLibrariesForSelfExtract=true' '-p:EnableCompressionInSingleFile=true' -o publish
 ```
 
+### Publishing a GitHub release
+
+1. Bump `<Version>` in `Directory.Build.props`, commit and push.
+2. Run `.\scripts\publish.ps1 -SmokeTest`.
+3. Create the release with tag `v<version>` (not a draft or prerelease, or the updater ignores it) and attach the three files the updater and users need:
+
+```powershell
+gh release create v1.1.0 --title "CryptoFixer 1.1.0" --notes "…" `
+  dist\CryptoFixer-win-x64.exe dist\CryptoFixer-1.1.0-win-x64.zip dist\CryptoFixer-1.1.0-win-x64.sha256
+```
+
+The updater looks for exactly `CryptoFixer-<runtime>.exe` and a `.sha256` asset that lists it, and refuses releases whose tag isn't a version number.
+
 ### Installing on a server
 
-Copy `CryptoFixer.exe` (or unzip the package) to any folder, for example `C:\Tools\CryptoFixer`, and run it. There is no installer, and the server needs no .NET runtime. The exe prompts for elevation. To check the download, compare `Get-FileHash CryptoFixer.exe` with the `.sha256` file.
+Copy `CryptoFixer.exe` (or unzip the package) to any folder, for example `C:\Tools\CryptoFixer`, and run it. There is no installer, and the server needs no .NET runtime. The exe prompts for elevation. To check the download, compare `Get-FileHash CryptoFixer.exe` with the `.sha256` file. Keep it in a folder that administrators can write to if you want it to update itself (see [Updates](#updates)).
 
 On first start the exe unpacks a few native WPF DLLs to `%TEMP%\.net\CryptoFixer\`. If policy blocks DLLs in `%TEMP%` (for example AppLocker), set the `DOTNET_BUNDLE_EXTRACT_BASE_DIR` environment variable to an allowed folder.
 
@@ -237,7 +271,8 @@ The app targets **.NET 10 (LTS)**. .NET 8 reached end of support on 10 November 
 
 ```
 src/CryptoFixer.Core    Registry abstraction, protocol catalog, OS defaults, state evaluation, apply logic, .reg export,
-                        search/filter/sort (Schannel/ProtocolQuery), presets (Presets/), portable settings (Settings/)
+                        search/filter/sort (Schannel/ProtocolQuery), presets (Presets/), portable settings (Settings/),
+                        GitHub release check, verified download and exe swap (Updates/)
 src/CryptoFixer         WPF app (MVVM), app.manifest (requireAdministrator), Assets/CryptoFixer.ico
 tests/CryptoFixer.Tests xUnit tests
 scripts/publish.ps1     Release build and packaging

@@ -20,6 +20,9 @@ public sealed record AppSettings
     public static AppSettings Default { get; } = new();
 
     public TableDisplayMode DisplayMode { get; init; } = TableDisplayMode.Standard;
+
+    /// <summary>Look for a newer GitHub release in the background when the app starts.</summary>
+    public bool CheckForUpdates { get; init; } = true;
 }
 
 /// <param name="Error">Set when the file exists but couldn't be read or isn't valid JSON; <see cref="Settings"/> holds the defaults then.</param>
@@ -32,7 +35,7 @@ public sealed record AppSettingsLoadResult(AppSettings Settings, IReadOnlyList<s
 /// <summary>
 /// Reads and writes the portable settings file (<see cref="FileName"/>) next to the executable:
 /// <code>
-/// { "formatVersion": 1, "displayMode": "compact" }
+/// { "formatVersion": 1, "displayMode": "compact", "checkForUpdates": true }
 /// </code>
 /// Missing, unknown or invalid values fall back to the defaults, so a damaged file never stops the app from starting.
 /// </summary>
@@ -41,7 +44,8 @@ public static class AppSettingsFile
     public const string FileName = "CryptoFixer.settings.json";
     public const int FormatVersion = 1;
 
-    private const string HelpText = "CryptoFixer settings. displayMode: \"standard\", \"compact\" or \"list\".";
+    private const string HelpText =
+        "CryptoFixer settings. displayMode: \"standard\", \"compact\" or \"list\". checkForUpdates: true or false (look for a new release at startup).";
 
     public static string DefaultPath(string baseDirectory) => Path.Combine(baseDirectory, FileName);
 
@@ -105,6 +109,18 @@ public static class AppSettingsFile
                 }
             }
 
+            if (PortableJsonFile.Property(document.RootElement, "checkForUpdates") is { } check)
+            {
+                if (check.ValueKind is JsonValueKind.True or JsonValueKind.False)
+                {
+                    settings = settings with { CheckForUpdates = check.GetBoolean() };
+                }
+                else
+                {
+                    warnings.Add($"checkForUpdates {check.GetRawText()} isn't valid (use true or false); using true.");
+                }
+            }
+
             return new AppSettingsLoadResult(settings, warnings, null, true);
         }
     }
@@ -119,6 +135,7 @@ public static class AppSettingsFile
             writer.WriteNumber("formatVersion", FormatVersion);
             writer.WriteString("help", HelpText);
             writer.WriteString("displayMode", ToToken(settings.DisplayMode));
+            writer.WriteBoolean("checkForUpdates", settings.CheckForUpdates);
             writer.WriteEndObject();
         });
     }

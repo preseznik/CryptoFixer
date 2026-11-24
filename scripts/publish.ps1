@@ -7,7 +7,8 @@
     2. Publishes src\CryptoFixer as a self-contained, compressed single-file exe. The target server doesn't need .NET installed.
     3. Checks the result: a single exe, the expected file version, the requireAdministrator manifest and the app icon.
     4. Packages dist\CryptoFixer-<version>-<runtime>\ (exe, README.md, docs screenshots), a zip of that folder,
-       and a .sha256 file with the hashes of the exe and the zip.
+       a standalone copy of the exe named dist\CryptoFixer-<runtime>.exe (the release asset the in-app updater downloads),
+       and dist\CryptoFixer-<version>-<runtime>.sha256 with the SHA-256 hashes of all three in sha256sum format.
     5. With -SmokeTest, starts the packaged exe in --read-only mode without elevation, waits for the main window, then closes it.
 
     The publish output, including the .pdb symbol files, is kept in artifacts\publish\<runtime>.
@@ -17,6 +18,9 @@
 
 .PARAMETER Runtime
     Target runtime identifier. Defaults to win-x64.
+
+.PARAMETER OutputDir
+    Folder for the packages. Defaults to dist in the repository root.
 
 .EXAMPLE
     .\scripts\publish.ps1
@@ -29,6 +33,7 @@ param(
     [string]$Version,
     [ValidateSet('win-x64', 'win-arm64', 'win-x86')]
     [string]$Runtime = 'win-x64',
+    [string]$OutputDir,
     [switch]$SkipTests,
     [switch]$SmokeTest
 )
@@ -59,10 +64,12 @@ $expectedFileVersion = '{0}.{1}.{2}.0' -f $Matches[1], $Matches[2], $Matches[3]
 
 $name = "CryptoFixer-$Version-$Runtime"
 $publishDir = Join-Path $root "artifacts\publish\$Runtime"
-$distDir = Join-Path $root 'dist'
+$distDir = if ($OutputDir) { [System.IO.Path]::GetFullPath($OutputDir) } else { Join-Path $root 'dist' }
 $packageDir = Join-Path $distDir $name
 $zipPath = Join-Path $distDir "$name.zip"
 $hashPath = Join-Path $distDir "$name.sha256"
+# Unversioned so that the updater (ReleaseInfo.ExecutableAssetName) finds it in every release.
+$standaloneExe = Join-Path $distDir "CryptoFixer-$Runtime.exe"
 
 if (-not $SkipTests) {
     Step 'Running tests'
@@ -166,10 +173,11 @@ if (-not $manifest -or $manifest -notmatch 'level="requireAdministrator"') { thr
 if ([CryptoFixerPublish.PeResources]::CountResources($exe, 14) -lt 1) { throw 'The exe has no icon.' }
 Write-Host "    File version $($info.FileVersion), product version $($info.ProductVersion), requireAdministrator manifest and icon present."
 
-Step "Packaging dist\$name"
-foreach ($old in $packageDir, $zipPath, $hashPath) { if (Test-Path $old) { Remove-Item $old -Recurse -Force } }
+Step "Packaging $name"
+foreach ($old in $packageDir, $zipPath, $hashPath, $standaloneExe) { if (Test-Path $old) { Remove-Item $old -Recurse -Force } }
 New-Item -ItemType Directory -Force (Join-Path $packageDir 'docs') | Out-Null
 Copy-Item $exe $packageDir
+Copy-Item $exe $standaloneExe
 Copy-Item (Join-Path $root 'README.md') $packageDir
 Copy-Item (Join-Path $root 'docs\*.png') (Join-Path $packageDir 'docs')
 foreach ($optional in 'LICENSE', 'LICENSE.txt', 'LICENSE.md') {
@@ -189,7 +197,7 @@ try {
 finally { $archive.Dispose() }
 
 $packagedExe = Join-Path $packageDir 'CryptoFixer.exe'
-$outputs = foreach ($file in $packagedExe, $zipPath) {
+$outputs = foreach ($file in $standaloneExe, $packagedExe, $zipPath) {
     $item = Get-Item $file
     [pscustomobject]@{
         File   = $item.FullName.Substring($distDir.Length + 1)

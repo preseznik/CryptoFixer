@@ -303,7 +303,8 @@
                                Foreground="{StaticResource MutedTextBrush}" Margin="0,3,0,0" />
                 </StackPanel>
 
-                <Border Grid.Column="1" VerticalAlignment="Top" CornerRadius="12" Padding="12,4" Margin="16,2,0,0">
+                <StackPanel Grid.Column="1" VerticalAlignment="Top" HorizontalAlignment="Right" Margin="16,2,0,0">
+                <Border HorizontalAlignment="Right" CornerRadius="12" Padding="12,4">
                     <Border.Style>
                         <Style TargetType="Border">
                             <Setter Property="Background" Value="#DAFBE1" />
@@ -328,7 +329,63 @@
                         </TextBlock.Style>
                     </TextBlock>
                 </Border>
+
+                <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,10,2,0">
+                    <TextBlock Text="{Binding Updates.VersionText}" FontSize="12" Foreground="{StaticResource MutedTextBrush}" VerticalAlignment="Center" />
+                    <TextBlock x:Name="UpdateStatusText" Text="{Binding Updates.StatusText, StringFormat='  ·  {0}'}" FontSize="12"
+                               VerticalAlignment="Center" ToolTip="{Binding Updates.StatusDetail}">
+                        <TextBlock.Style>
+                            <Style TargetType="TextBlock">
+                                <Setter Property="Foreground" Value="{StaticResource MutedTextBrush}" />
+                                <Style.Triggers>
+                                    <DataTrigger Binding="{Binding Updates.StatusText}" Value="">
+                                        <Setter Property="Visibility" Value="Collapsed" />
+                                    </DataTrigger>
+                                    <DataTrigger Binding="{Binding Updates.State}" Value="Available">
+                                        <Setter Property="Foreground" Value="#0969DA" />
+                                        <Setter Property="FontWeight" Value="SemiBold" />
+                                    </DataTrigger>
+                                </Style.Triggers>
+                            </Style>
+                        </TextBlock.Style>
+                    </TextBlock>
+                    <Button x:Name="UpdatesButton" Content="Updates ▾" Style="{StaticResource LinkButtonStyle}" FontSize="12" Margin="14,0,0,0"
+                            VerticalAlignment="Center" Click="OnUpdatesClick" AutomationProperties.Name="Updates"
+                            ToolTip="Check GitHub for a newer CryptoFixer release." />
+                </StackPanel>
+                </StackPanel>
             </Grid>
+        </Border>
+
+        <!-- Update available -->
+        <Border DockPanel.Dock="Top" Background="#DDF4FF" BorderBrush="#9CD7FF" BorderThickness="0,0,0,1" Padding="24,10"
+                Visibility="{Binding Updates.IsBannerVisible, Converter={StaticResource BoolToVisibility}}">
+            <DockPanel>
+                <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
+                    <Button Content="Release notes" Style="{StaticResource LinkButtonStyle}" Command="{Binding Updates.OpenReleaseNotesCommand}"
+                            VerticalAlignment="Center" Margin="0,0,14,0" />
+                    <Button Content="Update now…" Command="{Binding Updates.InstallCommand}" Style="{StaticResource PrimaryButtonStyle}"
+                            Visibility="{Binding Updates.IsNotDownloading, Converter={StaticResource BoolToVisibility}}" />
+                    <Button Content="Cancel" Command="{Binding Updates.CancelDownloadCommand}"
+                            Visibility="{Binding Updates.IsDownloading, Converter={StaticResource BoolToVisibility}}" />
+                    <Button Content="✕" Command="{Binding Updates.DismissCommand}" ToolTip="Hide until the next check" AutomationProperties.Name="Dismiss update notice"
+                            Style="{StaticResource LinkButtonStyle}" VerticalAlignment="Center" Margin="12,0,0,0"
+                            Visibility="{Binding Updates.IsNotDownloading, Converter={StaticResource BoolToVisibility}}" />
+                </StackPanel>
+                <StackPanel VerticalAlignment="Center">
+                    <TextBlock TextWrapping="Wrap">
+                        <Run Text="⬆ Update available: " FontWeight="SemiBold" />
+                        <Run Text="{Binding Updates.BannerText, Mode=OneWay}" />
+                    </TextBlock>
+                    <StackPanel Orientation="Horizontal" Margin="0,6,0,0"
+                                Visibility="{Binding Updates.IsDownloading, Converter={StaticResource BoolToVisibility}}">
+                        <ProgressBar Width="220" Height="8" Minimum="0" Maximum="100" Value="{Binding Updates.DownloadPercent, Mode=OneWay}"
+                                     IsIndeterminate="{Binding Updates.IsProgressIndeterminate}" AutomationProperties.Name="Download progress" />
+                        <TextBlock Text="{Binding Updates.DownloadText}" Margin="10,0,0,0" FontSize="12" VerticalAlignment="Center"
+                                   Foreground="{StaticResource MutedTextBrush}" />
+                    </StackPanel>
+                </StackPanel>
+            </DockPanel>
         </Border>
 
         <!-- Restart notice -->

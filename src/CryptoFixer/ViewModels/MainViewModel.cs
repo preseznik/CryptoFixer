@@ -18,7 +18,7 @@ public sealed record Choice<T>(T Value, string Label)
     public override string ToString() => Label;
 }
 
-public sealed class MainViewModel : ObservableObject
+public sealed class MainViewModel : ObservableObject, IUpdateHost
 {
     private readonly SchannelProtocolStore _store;
     private readonly WindowsVersionInfo _os;
@@ -28,6 +28,7 @@ public sealed class MainViewModel : ObservableObject
     private string _statusText = string.Empty;
     private bool _restartRequired;
     private int _pendingCount;
+    private bool _closingForUpdate;
 
     private ProtocolFilter _filter = new();
     private string _searchText = string.Empty;
@@ -51,7 +52,8 @@ public sealed class MainViewModel : ObservableObject
         string presetsPath,
         string settingsPath,
         IDialogService dialogs,
-        ISystemActions system)
+        ISystemActions system,
+        UpdateSetup updates)
     {
         _store = store;
         _os = os;
@@ -62,6 +64,7 @@ public sealed class MainViewModel : ObservableObject
         SettingsPath = settingsPath;
         _dialogs = dialogs;
         _system = system;
+        Updates = new UpdatesViewModel(updates, dialogs, system, this);
 
         var settings = AppSettingsFile.Load(SettingsPath);
         _settings = settings.Settings;
@@ -97,6 +100,11 @@ public sealed class MainViewModel : ObservableObject
             ? "Choose a setting per protocol and role, or load a preset, then click Apply changes. Nothing is written until you apply."
             : $"{ReadOnlyReason} Preview mode: you can stage settings and presets to see their effect, but nothing can be applied.";
 
+        if (updates.UpdatedFromMessage is not null)
+        {
+            StatusText = updates.UpdatedFromMessage;
+        }
+
         var presets = LoadPresets();
         if (presets.Error is not null || presets.Warnings.Count > 0)
         {
@@ -105,7 +113,7 @@ public sealed class MainViewModel : ObservableObject
 
         if (settings.Error is not null || settings.Warnings.Count > 0)
         {
-            StatusText = $"Settings file problem: {settings.Error ?? string.Join(" ", settings.Warnings)} Using the default display mode. ({SettingsPath})";
+            StatusText = $"Settings file problem: {settings.Error ?? string.Join(" ", settings.Warnings)} Using defaults where needed. ({SettingsPath})";
         }
     }
 
@@ -308,6 +316,36 @@ public sealed class MainViewModel : ObservableObject
 
     public bool IsTableMode => !IsListMode;
 
+    /// <summary>Whether to look for a new release in the background at startup; remembered in the settings file.</summary>
+    public bool CheckForUpdatesAtStartup
+    {
+        get => _settings.CheckForUpdates;
+        set
+        {
+            if (value == _settings.CheckForUpdates)
+            {
+                return;
+            }
+
+            _settings = _settings with { CheckForUpdates = value };
+            OnPropertyChanged();
+            SaveSettings();
+            StatusText = value
+                ? "CryptoFixer will check for updates when it starts."
+                : "Automatic update checks are off. Use Updates ▸ Check for updates now to check manually.";
+        }
+    }
+
+    public UpdatesViewModel Updates { get; }
+
+    string? IUpdateHost.PendingChangesWarning => HasPendingChanges
+        ? $"You have {PendingSummary.ToLowerInvariant()} that weren't applied. Restarting CryptoFixer discards them."
+        : null;
+
+    void IUpdateHost.ReportStatus(string message) => StatusText = message;
+
+    void IUpdateHost.PrepareForRestart() => _closingForUpdate = true;
+
     public string SettingsPath { get; }
 
     // ---- Presets ----
@@ -367,7 +405,7 @@ public sealed class MainViewModel : ObservableObject
 
     /// <summary>Returns false if the user cancelled closing because of pending changes.</summary>
     public bool ConfirmClose() =>
-        !CanWrite || !HasPendingChanges ||
+        _closingForUpdate || !CanWrite || !HasPendingChanges ||
         _dialogs.Confirm("Discard pending changes?", $"You have {PendingSummary.ToLowerInvariant()} that were not applied. Exit anyway?");
 
     /// <summary>Column header click: ascending, then descending, then back to protocol version order.</summary>
@@ -430,7 +468,7 @@ public sealed class MainViewModel : ObservableObject
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
-            StatusText = $"The display mode can't be remembered: writing {SettingsPath} failed ({ex.Message}).";
+            StatusText = $"Settings can't be saved: writing {SettingsPath} failed ({ex.Message}).";
         }
     }
 
