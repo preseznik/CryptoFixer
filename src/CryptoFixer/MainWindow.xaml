@@ -69,7 +69,7 @@
                 </Border>
                 <Ellipse x:Name="Dot" DockPanel.Dock="Left" Width="8" Height="8" Margin="10,0,6,0" VerticalAlignment="Center" Fill="#1A7F37" />
                 <DockPanel VerticalAlignment="Center" LastChildFill="True">
-                    <TextBlock x:Name="EffectiveText" DockPanel.Dock="Left" Text="{Binding EffectiveText}" FontWeight="SemiBold" />
+                    <TextBlock x:Name="EffectiveText" DockPanel.Dock="Left" Text="{Binding EffectiveText}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
                     <TextBlock x:Name="SourceText" DockPanel.Dock="Left" Text="{Binding ShortSourceText}" Foreground="{StaticResource MutedTextBrush}"
                                FontSize="11" Margin="5,0,0,0" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
                     <TextBlock Text="{Binding ShortPendingText}" Foreground="#9A6700" FontWeight="SemiBold" FontSize="11" Margin="6,0,0,0"
@@ -186,6 +186,17 @@
             <ContentPresenter Content="{Binding Client}" ContentTemplate="{StaticResource CompactCellTemplate}" />
         </DataTemplate>
 
+        <DataTemplate x:Key="ResetCellTemplate" DataType="{x:Type vm:ProtocolRowViewModel}">
+            <Button Style="{StaticResource LinkButtonStyle}" Content="Reset to OS default" Margin="8,0,16,0" VerticalAlignment="Center"
+                    Command="{Binding ResetToOsDefaultCommand}"
+                    ToolTip="Stage removal of Enabled/DisabledByDefault for Server and Client so Windows uses its built-in default." />
+        </DataTemplate>
+        <DataTemplate x:Key="CompactResetCellTemplate" DataType="{x:Type vm:ProtocolRowViewModel}">
+            <Button Style="{StaticResource LinkButtonStyle}" Content="Reset" Margin="6,0,12,0" VerticalAlignment="Center"
+                    Command="{Binding ResetToOsDefaultCommand}" AutomationProperties.Name="Reset to OS default"
+                    ToolTip="Reset to OS default: stage removal of Enabled/DisabledByDefault for Server and Client so Windows uses its built-in default." />
+        </DataTemplate>
+
         <!-- Segmented control for the display mode. -->
         <Style x:Key="SegmentedListBoxStyle" TargetType="ListBox">
             <Setter Property="Background" Value="{StaticResource SurfaceBrush}" />
@@ -284,16 +295,43 @@
         </Style>
     </Window.Resources>
 
+    <Window.InputBindings>
+        <KeyBinding Key="M" Modifiers="Control" Command="{Binding Machines.TogglePanelCommand}" />
+    </Window.InputBindings>
+
     <DockPanel>
         <!-- Header -->
         <Border DockPanel.Dock="Top" Background="{StaticResource SurfaceBrush}" BorderBrush="{StaticResource BorderBrush}" BorderThickness="0,0,0,1" Padding="24,16">
             <Grid>
                 <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto" />
                     <ColumnDefinition Width="*" />
                     <ColumnDefinition Width="Auto" />
                 </Grid.ColumnDefinitions>
-                <StackPanel>
-                    <TextBlock Text="Schannel protocols" FontSize="22" FontWeight="SemiBold" />
+                <Button x:Name="MachinesButton" Content="&#xE700;" FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" FontSize="16"
+                        Command="{Binding Machines.TogglePanelCommand}" MinWidth="0" Padding="10,8" Margin="0,2,16,0" VerticalAlignment="Top"
+                        AutomationProperties.Name="Machines" ToolTip="Show or hide the machine list to manage remote computers (Ctrl+M)." />
+                <StackPanel Grid.Column="1">
+                    <WrapPanel>
+                        <TextBlock Text="Schannel protocols" FontSize="22" FontWeight="SemiBold" VerticalAlignment="Center" Margin="0,0,12,0" />
+                        <Border CornerRadius="12" Padding="10,3" VerticalAlignment="Center" Margin="0,4,0,0" ToolTip="{Binding TargetDetail}">
+                            <Border.Style>
+                                <Style TargetType="Border">
+                                    <Setter Property="Background" Value="#EAEEF2" />
+                                    <Style.Triggers>
+                                        <DataTrigger Binding="{Binding IsRemoteTarget}" Value="True">
+                                            <Setter Property="Background" Value="#DDF4FF" />
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </Border.Style>
+                            <TextBlock FontSize="12" AutomationProperties.Name="Computer">
+                                <Run Text="&#xE7F4;" FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" />
+                                <Run Text="{Binding TargetName, Mode=OneWay}" FontWeight="SemiBold" />
+                                <Run Text="{Binding TargetDetail, Mode=OneWay, StringFormat='· {0}'}" Foreground="{StaticResource MutedTextBrush}" />
+                            </TextBlock>
+                        </Border>
+                    </WrapPanel>
                     <TextBlock Margin="0,4,0,0" Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap">
                         <Run Text="{Binding OsSummary, Mode=OneWay}" FontWeight="SemiBold" Foreground="#1F2328" />
                         <Run Text="  ·  " />
@@ -303,7 +341,7 @@
                                Foreground="{StaticResource MutedTextBrush}" Margin="0,3,0,0" />
                 </StackPanel>
 
-                <StackPanel Grid.Column="1" VerticalAlignment="Top" HorizontalAlignment="Right" Margin="16,2,0,0">
+                <StackPanel Grid.Column="2" VerticalAlignment="Top" HorizontalAlignment="Right" Margin="16,2,0,0">
                 <Border HorizontalAlignment="Right" CornerRadius="12" Padding="12,4">
                     <Border.Style>
                         <Style TargetType="Border">
@@ -357,6 +395,139 @@
             </Grid>
         </Border>
 
+        <!-- Machines panel: slides in from the left (Ctrl+M; animated in code-behind). Selecting a machine shows its settings. -->
+        <Border x:Name="MachinesPanel" DockPanel.Dock="Left" Width="0" Visibility="Collapsed" ClipToBounds="True"
+                Background="{StaticResource SurfaceBrush}" BorderBrush="{StaticResource BorderBrush}" BorderThickness="0,0,1,0">
+
+            <Border.InputBindings>
+                <KeyBinding Key="Escape" Command="{Binding Machines.ClosePanelCommand}" />
+            </Border.InputBindings>
+
+            <!-- Fixed width so the content doesn't reflow while the panel slides. -->
+            <DockPanel Width="271" HorizontalAlignment="Left">
+                <DockPanel DockPanel.Dock="Top" Margin="16,14,10,10">
+                    <Button DockPanel.Dock="Right" Content="✕" Style="{StaticResource LinkButtonStyle}" Command="{Binding Machines.ClosePanelCommand}"
+                            Padding="6,2" VerticalAlignment="Center" AutomationProperties.Name="Close machine list"
+                            ToolTip="Hide the machine list (Ctrl+M or Esc)." />
+                    <TextBlock Text="Machines" FontSize="15" FontWeight="SemiBold" VerticalAlignment="Center" />
+                </DockPanel>
+
+                <Grid DockPanel.Dock="Top" Margin="16,0,16,8">
+                    <TextBox x:Name="MachineFilterBox" Text="{Binding Machines.FilterText, UpdateSourceTrigger=PropertyChanged}"
+                             Padding="24,5,6,5" VerticalContentAlignment="Center" AutomationProperties.Name="Filter machines"
+                             ToolTip="Filter by name or host/IP address. Esc clears the filter.">
+                        <TextBox.InputBindings>
+                            <KeyBinding Key="Escape" Command="{Binding Machines.ClearFilterCommand}" />
+                        </TextBox.InputBindings>
+                    </TextBox>
+                    <TextBlock Text="&#xE71C;" FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" FontSize="12" Margin="8,0,0,0"
+                               VerticalAlignment="Center" Foreground="{StaticResource MutedTextBrush}" IsHitTestVisible="False" />
+                    <TextBlock Text="Filter by name or IP" Margin="27,0,0,0" VerticalAlignment="Center" IsHitTestVisible="False" Foreground="#8C959F">
+                        <TextBlock.Style>
+                            <Style TargetType="TextBlock">
+                                <Setter Property="Visibility" Value="Collapsed" />
+                                <Style.Triggers>
+                                    <DataTrigger Binding="{Binding Text, ElementName=MachineFilterBox}" Value="">
+                                        <Setter Property="Visibility" Value="Visible" />
+                                    </DataTrigger>
+                                </Style.Triggers>
+                            </Style>
+                        </TextBlock.Style>
+                    </TextBlock>
+                </Grid>
+
+                <DockPanel DockPanel.Dock="Top" Margin="16,0,16,8">
+                    <TextBlock Text="Sort" VerticalAlignment="Center" Margin="0,0,8,0" Foreground="{StaticResource MutedTextBrush}" />
+                    <ComboBox Padding="6,4" AutomationProperties.Name="Sort machines by"
+                              ItemsSource="{Binding Machines.SortOptions}" DisplayMemberPath="Label" SelectedValuePath="Value"
+                              SelectedValue="{Binding Machines.SortOrder}"
+                              ToolTip="Name: alphabetical. IP address: numeric (IPv4, then IPv6, then host names). This computer always stays first." />
+                </DockPanel>
+
+                <DockPanel DockPanel.Dock="Top" Margin="16,0,16,6">
+                    <Button DockPanel.Dock="Right" Style="{StaticResource LinkButtonStyle}" Content="Clear" FontSize="11.5" VerticalAlignment="Center"
+                            Command="{Binding Machines.ClearFilterCommand}" AutomationProperties.Name="Clear machine filter"
+                            Visibility="{Binding Machines.IsFilterActive, Converter={StaticResource BoolToVisibility}}" />
+                    <TextBlock Text="{Binding Machines.CountText}" FontSize="11.5" Foreground="{StaticResource MutedTextBrush}" VerticalAlignment="Center" />
+                </DockPanel>
+
+                <StackPanel DockPanel.Dock="Bottom" Margin="16,10,16,14">
+                    <StackPanel Orientation="Horizontal">
+                        <Button Content="Add…" Command="{Binding Machines.AddCommand}" Style="{StaticResource PrimaryButtonStyle}" Margin="0" MinWidth="64"
+                                ToolTip="Add a remote computer: name, host name or IP address, and credentials." />
+                        <Button Content="Edit…" Command="{Binding Machines.EditCommand}" CommandParameter="{Binding Machines.SelectedItem}" MinWidth="64"
+                                ToolTip="Edit the selected remote computer (F2)." ToolTipService.ShowOnDisabled="True" />
+                        <Button Content="Remove" Command="{Binding Machines.RemoveCommand}" CommandParameter="{Binding Machines.SelectedItem}" MinWidth="64"
+                                ToolTip="Remove the selected remote computer from the list (Delete)." ToolTipService.ShowOnDisabled="True" />
+                    </StackPanel>
+                    <TextBlock Text="{Binding Machines.FileName, StringFormat='Saved in {0} next to CryptoFixer.exe. Right-click a machine for more.'}"
+                               ToolTip="{Binding Machines.FilePath}" FontSize="11" TextWrapping="Wrap" Margin="0,10,0,0"
+                               Foreground="{StaticResource MutedTextBrush}" />
+                </StackPanel>
+
+                <Grid>
+                    <ListBox x:Name="MachineList" ItemsSource="{Binding Machines.ItemsView}" SelectedItem="{Binding Machines.SelectedItem, Mode=TwoWay}"
+                             IsSynchronizedWithCurrentItem="False" BorderThickness="0,1" BorderBrush="#EAEEF2" Background="Transparent"
+                             HorizontalContentAlignment="Stretch" ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                             AutomationProperties.Name="Machines" PreviewMouseRightButtonDown="OnMachineListPreviewRightButtonDown">
+                        <ListBox.InputBindings>
+                            <KeyBinding Key="Delete" Command="{Binding Machines.RemoveCommand}" CommandParameter="{Binding Machines.SelectedItem}" />
+                            <KeyBinding Key="F2" Command="{Binding Machines.EditCommand}" CommandParameter="{Binding Machines.SelectedItem}" />
+                        </ListBox.InputBindings>
+                        <ListBox.ItemContainerStyle>
+                            <Style TargetType="ListBoxItem">
+                                <Setter Property="Padding" Value="12,7,8,7" />
+                                <Setter Property="AutomationProperties.Name" Value="{Binding Name}" />
+                                <Setter Property="AutomationProperties.HelpText" Value="{Binding StatusToolTip}" />
+                            </Style>
+                        </ListBox.ItemContainerStyle>
+                        <ListBox.ItemTemplate>
+                            <DataTemplate DataType="{x:Type vm:MachineItemViewModel}">
+                                <DockPanel Background="Transparent" ToolTip="{Binding StatusToolTip}"
+                                           Tag="{Binding DataContext, RelativeSource={RelativeSource AncestorType=ListBox}}">
+                                    <DockPanel.ContextMenu>
+                                        <ContextMenu DataContext="{Binding PlacementTarget.Tag, RelativeSource={RelativeSource Self}}">
+                                            <MenuItem Header="Connect" Command="{Binding Machines.ConnectCommand}"
+                                                      CommandParameter="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource AncestorType=ContextMenu}}" />
+                                            <MenuItem Header="Edit…" Command="{Binding Machines.EditCommand}"
+                                                      CommandParameter="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource AncestorType=ContextMenu}}" />
+                                            <Separator />
+                                            <MenuItem Header="Remove…" Command="{Binding Machines.RemoveCommand}"
+                                                      CommandParameter="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource AncestorType=ContextMenu}}" />
+                                        </ContextMenu>
+                                    </DockPanel.ContextMenu>
+                                    <Ellipse x:Name="StatusDot" DockPanel.Dock="Left" Width="9" Height="9" Margin="0,5,10,0" VerticalAlignment="Top" Fill="#AFB8C1" />
+                                    <StackPanel>
+                                        <TextBlock Text="{Binding Name}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
+                                        <TextBlock Text="{Binding Details}" FontSize="11.5" Foreground="{StaticResource MutedTextBrush}" TextTrimming="CharacterEllipsis"
+                                                   Margin="0,1,0,0" />
+                                    </StackPanel>
+                                </DockPanel>
+                                <DataTemplate.Triggers>
+                                    <DataTrigger Binding="{Binding Status}" Value="Connecting">
+                                        <Setter TargetName="StatusDot" Property="Fill" Value="#BF8700" />
+                                    </DataTrigger>
+                                    <DataTrigger Binding="{Binding Status}" Value="Connected">
+                                        <Setter TargetName="StatusDot" Property="Fill" Value="#1A7F37" />
+                                    </DataTrigger>
+                                    <DataTrigger Binding="{Binding Status}" Value="Error">
+                                        <Setter TargetName="StatusDot" Property="Fill" Value="#CF222E" />
+                                    </DataTrigger>
+                                </DataTemplate.Triggers>
+                            </DataTemplate>
+                        </ListBox.ItemTemplate>
+                    </ListBox>
+
+                    <StackPanel VerticalAlignment="Top" Margin="16,66,16,0"
+                                Visibility="{Binding Machines.HasNoMatches, Converter={StaticResource BoolToVisibility}}">
+                        <TextBlock Text="No machines match the filter." Foreground="{StaticResource MutedTextBrush}" HorizontalAlignment="Center" />
+                        <Button Style="{StaticResource LinkButtonStyle}" Content="Clear filter" HorizontalAlignment="Center" Margin="0,4,0,0"
+                                Command="{Binding Machines.ClearFilterCommand}" />
+                    </StackPanel>
+                </Grid>
+            </DockPanel>
+        </Border>
+
         <!-- Update available -->
         <Border DockPanel.Dock="Top" Background="#DDF4FF" BorderBrush="#9CD7FF" BorderThickness="0,0,0,1" Padding="24,10"
                 Visibility="{Binding Updates.IsBannerVisible, Converter={StaticResource BoolToVisibility}}">
@@ -403,7 +574,7 @@
                 </Style>
             </Border.Style>
             <DockPanel>
-                <Button DockPanel.Dock="Right" Content="Restart Windows…" Command="{Binding RestartCommand}"
+                <Button DockPanel.Dock="Right" Content="{Binding RestartButtonText}" Command="{Binding RestartCommand}"
                         Visibility="{Binding RestartRequired, Converter={StaticResource BoolToVisibility}}" />
                 <TextBlock TextWrapping="Wrap" VerticalAlignment="Center">
                     <Run Text="⟳ Restart required: " FontWeight="SemiBold" />
@@ -521,7 +692,7 @@
                       HorizontalGridLinesBrush="#EAEEF2" BorderThickness="0" Background="Transparent" Margin="1"
                       SelectionMode="Single" SelectionUnit="FullRow" IsReadOnly="True"
                       ColumnHeaderStyle="{StaticResource HeaderStyle}" CellStyle="{StaticResource CellStyle}" RowStyle="{StaticResource RowStyle}"
-                      VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"
+                      VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto"
                       EnableRowVirtualization="False">
                 <DataGrid.Columns>
                     <DataGridTemplateColumn x:Name="ProtocolColumn" Header="Protocol" Width="3*" MinWidth="220" SortMemberPath="Name"
@@ -531,15 +702,7 @@
                     <DataGridTemplateColumn x:Name="ClientColumn" Header="Client  (outgoing connections)" Width="2.4*" MinWidth="230" SortMemberPath="Client"
                                             CellTemplate="{StaticResource ClientCellTemplate}" />
 
-                    <DataGridTemplateColumn Header="" Width="Auto">
-                        <DataGridTemplateColumn.CellTemplate>
-                            <DataTemplate DataType="{x:Type vm:ProtocolRowViewModel}">
-                                <Button Style="{StaticResource LinkButtonStyle}" Content="Reset to OS default" Margin="8,0,16,0" VerticalAlignment="Center"
-                                        Command="{Binding ResetToOsDefaultCommand}"
-                                        ToolTip="Stage removal of Enabled/DisabledByDefault for Server and Client so Windows uses its built-in default." />
-                            </DataTemplate>
-                        </DataGridTemplateColumn.CellTemplate>
-                    </DataGridTemplateColumn>
+                    <DataGridTemplateColumn x:Name="ResetColumn" Header="" Width="Auto" MinWidth="140" CellTemplate="{StaticResource ResetCellTemplate}" />
                 </DataGrid.Columns>
             </DataGrid>
 
@@ -596,6 +759,51 @@
                 <Button Style="{StaticResource LinkButtonStyle}" Content="Clear filters" HorizontalAlignment="Center" Margin="0,6,0,0"
                         Command="{Binding ClearFiltersCommand}" />
             </StackPanel>
+
+            <!-- Remote connection progress/errors and long-running remote operations. -->
+            <Border Background="#F2FFFFFF" CornerRadius="8" Visibility="{Binding ShowOverlay, Converter={StaticResource BoolToVisibility}}">
+                <StackPanel HorizontalAlignment="Center" VerticalAlignment="Top" Margin="32,72,32,0" MaxWidth="580">
+                    <StackPanel Visibility="{Binding IsConnecting, Converter={StaticResource BoolToVisibility}}">
+                        <TextBlock Text="{Binding ConnectionTitle}" FontSize="16" FontWeight="SemiBold" HorizontalAlignment="Center" />
+                        <TextBlock Text="{Binding ConnectionMessage}" TextWrapping="Wrap" TextAlignment="Center" Margin="0,6,0,0"
+                                   Foreground="{StaticResource MutedTextBrush}" />
+                        <ProgressBar IsIndeterminate="True" Width="260" Height="6" Margin="0,16,0,0" AutomationProperties.Name="Connecting" />
+                        <Button Content="Cancel" Command="{Binding BackToLocalCommand}" HorizontalAlignment="Center" Margin="0,16,0,0"
+                                ToolTip="Stop connecting and show this computer again." />
+                    </StackPanel>
+
+                    <StackPanel Visibility="{Binding IsConnectionFailed, Converter={StaticResource BoolToVisibility}}">
+                        <TextBlock Text="{Binding ConnectionTitle}" FontSize="16" FontWeight="SemiBold" HorizontalAlignment="Center">
+                            <TextBlock.Style>
+                                <Style TargetType="TextBlock">
+                                    <Setter Property="Foreground" Value="#CF222E" />
+                                    <Style.Triggers>
+                                        <DataTrigger Binding="{Binding ConnectionTitle}" Value="Restarting">
+                                            <Setter Property="Foreground" Value="#1F2328" />
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </TextBlock.Style>
+                        </TextBlock>
+                        <TextBlock Text="{Binding ConnectionMessage}" TextWrapping="Wrap" TextAlignment="Center" Margin="0,6,0,0" />
+                        <TextBox Text="{Binding ConnectionDetail, Mode=OneWay}" IsReadOnly="True" TextWrapping="Wrap" MaxHeight="150"
+                                 VerticalScrollBarVisibility="Auto" FontFamily="Cascadia Mono, Consolas" FontSize="11.5" Margin="0,12,0,0" Padding="8,6"
+                                 Background="#F6F8FA" BorderBrush="#D0D7DE" AutomationProperties.Name="Error details"
+                                 Visibility="{Binding HasConnectionDetail, Converter={StaticResource BoolToVisibility}}" />
+                        <WrapPanel HorizontalAlignment="Center" Margin="0,16,0,0">
+                            <Button Content="Try again" Command="{Binding RetryConnectCommand}" Style="{StaticResource PrimaryButtonStyle}" Margin="0" />
+                            <Button Content="Edit connection…" Command="{Binding EditCurrentMachineCommand}"
+                                    ToolTip="Change the host, connection type or credentials of this machine." />
+                            <Button Content="Back to this computer" Command="{Binding BackToLocalCommand}" />
+                        </WrapPanel>
+                    </StackPanel>
+
+                    <StackPanel Visibility="{Binding IsBusy, Converter={StaticResource BoolToVisibility}}">
+                        <TextBlock Text="{Binding BusyText}" TextWrapping="Wrap" TextAlignment="Center" FontSize="14" />
+                        <ProgressBar IsIndeterminate="True" Width="260" Height="6" Margin="0,16,0,0" AutomationProperties.Name="Working" />
+                    </StackPanel>
+                </StackPanel>
+            </Border>
             </Grid>
         </Border>
     </DockPanel>

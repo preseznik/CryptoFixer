@@ -19,7 +19,8 @@ public sealed record AppSettings
 {
     public static AppSettings Default { get; } = new();
 
-    public TableDisplayMode DisplayMode { get; init; } = TableDisplayMode.Standard;
+    /// <summary>Compact is the default for new installs; an explicitly saved choice wins.</summary>
+    public TableDisplayMode DisplayMode { get; init; } = TableDisplayMode.Compact;
 
     /// <summary>Look for a newer GitHub release in the background when the app starts.</summary>
     public bool CheckForUpdates { get; init; } = true;
@@ -105,7 +106,7 @@ public static class AppSettingsFile
                 }
                 else
                 {
-                    warnings.Add($"displayMode {value.GetRawText()} isn't valid (use \"standard\", \"compact\" or \"list\"); using \"standard\".");
+                    warnings.Add($"displayMode {value.GetRawText()} isn't valid (use \"standard\", \"compact\" or \"list\"); using \"{ToToken(AppSettings.Default.DisplayMode)}\".");
                 }
             }
 

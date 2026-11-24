@@ -5,6 +5,7 @@ using System.Windows;
 using System.Windows.Threading;
 using CryptoFixer.Core.Presets;
 using CryptoFixer.Core.Registry;
+using CryptoFixer.Core.Remote;
 using CryptoFixer.Core.Schannel;
 using CryptoFixer.Core.Settings;
 using CryptoFixer.Core.Updates;
@@ -36,15 +37,23 @@ public partial class App : Application
         var os = WindowsVersionInfo.Read(registry, Environment.OSVersion.Version.Build);
         var backupFolder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "CryptoFixer", "Backups");
 
-        // Presets and settings live next to the executable (also for single-file publish) so they travel with a portable copy.
+        // Presets, settings and the machine list live next to the executable (also for single-file publish) so they travel with a portable copy.
         var presetsPath = PresetFile.DefaultPath(AppContext.BaseDirectory);
         var settingsPath = AppSettingsFile.DefaultPath(AppContext.BaseDirectory);
+
+        // Remote changes need administrator rights on the remote computer, not elevation here; --read-only also makes remote connections read-only.
+        var remote = new RemoteSetup(
+            MachineListFile.DefaultPath(AppContext.BaseDirectory),
+            new CimRemoteConnector(),
+            new DpapiSecretProtector(),
+            AllowWrites: !forceReadOnly,
+            ReadOnlyReason: "Started with --read-only.");
 
         var window = new MainWindow();
         MainWindow = window;
         window.DataContext = new MainViewModel(
-            new SchannelProtocolStore(registry), os, canWrite, readOnlyReason, backupFolder, presetsPath, settingsPath, new DialogService(), system,
-            CreateUpdateSetup(e.Args));
+            SchannelTarget.Local(new SchannelProtocolStore(registry), os, canWrite, readOnlyReason), remote,
+            backupFolder, presetsPath, settingsPath, new DialogService(), system, CreateUpdateSetup(e.Args));
         window.Show();
     }
 

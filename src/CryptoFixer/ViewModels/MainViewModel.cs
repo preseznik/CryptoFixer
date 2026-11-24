@@ -2,11 +2,13 @@ using System.Collections;
 using System.Collections.ObjectModel;
 using System.Collections.Specialized;
 using System.IO;
+using System.Security;
 using System.Text;
 using System.Windows.Data;
 using System.Windows.Input;
 using CryptoFixer.Core.Backup;
 using CryptoFixer.Core.Presets;
+using CryptoFixer.Core.Remote;
 using CryptoFixer.Core.Schannel;
 using CryptoFixer.Core.Settings;
 using CryptoFixer.Services;
@@ -18,17 +20,39 @@ public sealed record Choice<T>(T Value, string Label)
     public override string ToString() => Label;
 }
 
-public sealed class MainViewModel : ObservableObject, IUpdateHost
+public enum ConnectionState
 {
-    private readonly SchannelProtocolStore _store;
-    private readonly WindowsVersionInfo _os;
+    Ready,
+    Connecting,
+    Failed,
+}
+
+public sealed class MainViewModel : ObservableObject, IUpdateHost, IMachineHost
+{
+    private const string LocalKey = "\0local";
+    private const string RemoteRestartComment = "CryptoFixer: restarting to apply Schannel protocol changes.";
+
+    private readonly SchannelTarget _localTarget;
+    private readonly RemoteSetup _remote;
     private readonly IDialogService _dialogs;
     private readonly ISystemActions _system;
+    private readonly HashSet<string> _restartPending = new(StringComparer.OrdinalIgnoreCase);
     private IReadOnlyList<ProtocolRoleState> _states = [];
     private string _statusText = string.Empty;
-    private bool _restartRequired;
     private int _pendingCount;
     private bool _closingForUpdate;
+
+    // The computer shown: null while connecting to a remote machine or after a failed connection.
+    private SchannelTarget? _target;
+    private MachineItemViewModel _currentMachine;
+    private ConnectionState _connectionState = ConnectionState.Ready;
+    private string _connectionTitle = string.Empty;
+    private string _connectionMessage = string.Empty;
+    private string? _connectionDetail;
+    private int _switchGeneration;
+    private CancellationTokenSource? _connectCancellation;
+    private bool _isBusy;
+    private string _busyText = string.Empty;
 
     private ProtocolFilter _filter = new();
     private string _searchText = string.Empty;
@@ -38,16 +62,15 @@ public sealed class MainViewModel : ObservableObject, IUpdateHost
     private bool _sortDescending;
     private int _visibleCount;
 
+    private IReadOnlyList<ProtocolPreset> _builtInPresets = [];
     private IReadOnlyList<ProtocolPreset> _userPresets = [];
     private string? _presetsError;
 
     private AppSettings _settings = AppSettings.Default;
 
     public MainViewModel(
-        SchannelProtocolStore store,
-        WindowsVersionInfo os,
-        bool canWrite,
-        string readOnlyReason,
+        SchannelTarget localTarget,
+        RemoteSetup remote,
         string backupFolder,
         string presetsPath,
         string settingsPath,
@@ -55,16 +78,17 @@ public sealed class MainViewModel : ObservableObject, IUpdateHost
         ISystemActions system,
         UpdateSetup updates)
     {
-        _store = store;
-        _os = os;
-        CanWrite = canWrite;
-        ReadOnlyReason = readOnlyReason;
+        _localTarget = localTarget;
+        _target = localTarget;
+        _remote = remote;
         BackupFolder = backupFolder;
         PresetsPath = presetsPath;
         SettingsPath = settingsPath;
         _dialogs = dialogs;
         _system = system;
         Updates = new UpdatesViewModel(updates, dialogs, system, this);
+        Machines = new MachinesViewModel(remote.MachinesPath, dialogs, remote.Protector, this, localTarget.HostName);
+        _currentMachine = Machines.Local;
 
         var settings = AppSettingsFile.Load(SettingsPath);
         _settings = settings.Settings;
@@ -78,23 +102,25 @@ public sealed class MainViewModel : ObservableObject, IUpdateHost
         RowsView.LiveFilteringProperties.Add(nameof(ProtocolRowViewModel.HasPendingChanges));
         ((INotifyCollectionChanged)RowsView).CollectionChanged += (_, _) => UpdateVisibleCount();
 
-        RefreshCommand = new RelayCommand(Refresh);
-        ApplyCommand = new RelayCommand(Apply, () => CanWrite && HasPendingChanges);
-        DiscardCommand = new RelayCommand(Discard, () => HasPendingChanges);
-        ExportBackupCommand = new RelayCommand(ExportBackup);
-        RestartCommand = new RelayCommand(Restart, () => CanWrite && RestartRequired);
+        RefreshCommand = new RelayCommand(Refresh, () => !IsBusy && !IsConnecting);
+        ApplyCommand = new RelayCommand(Apply, () => CanWrite && HasPendingChanges && !IsBusy);
+        DiscardCommand = new RelayCommand(Discard, () => HasPendingChanges && !IsBusy);
+        ExportBackupCommand = new RelayCommand(ExportBackup, () => HasTarget && !IsBusy);
+        RestartCommand = new RelayCommand(Restart, () => CanWrite && RestartRequired && !IsBusy);
         OpenBackupFolderCommand = new RelayCommand(() => _system.OpenFolder(BackupFolder));
         ClearFiltersCommand = new RelayCommand(ClearFilters, () => IsFilterActive);
         ClearSearchCommand = new RelayCommand(() => SearchText = string.Empty);
         ToggleSortDirectionCommand = new RelayCommand(() => SortDescending = !SortDescending);
-        StagePresetCommand = new RelayCommand<ProtocolPreset>(StagePreset);
+        StagePresetCommand = new RelayCommand<ProtocolPreset>(StagePreset, _ => HasTarget && !IsBusy);
         DeletePresetCommand = new RelayCommand<ProtocolPreset>(DeletePreset, p => !p.IsBuiltIn);
-        SavePresetCommand = new RelayCommand(SavePreset);
+        SavePresetCommand = new RelayCommand(SavePreset, () => HasTarget && !IsBusy);
         ReloadPresetsCommand = new RelayCommand(() => StatusText = DescribeLoad(LoadPresets()));
         EditPresetsFileCommand = new RelayCommand(EditPresetsFile);
+        RetryConnectCommand = new RelayCommand(() => TrySwitch(_currentMachine, force: true), () => IsRemoteTarget && !IsBusy && !IsConnecting);
+        EditCurrentMachineCommand = new RelayCommand(() => Machines.EditCommand.Execute(_currentMachine), () => IsRemoteTarget && !IsBusy);
+        BackToLocalCommand = new RelayCommand(() => TrySwitch(Machines.Local), () => IsRemoteTarget && !IsBusy);
 
-        Reload();
-        BuiltInPresetList = BuiltInPresets.For(_states);
+        PopulateRows(localTarget.Store.ReadAll(localTarget.Os.Build));
 
         StatusText = CanWrite
             ? "Choose a setting per protocol and role, or load a preset, then click Apply changes. Nothing is written until you apply."
@@ -111,6 +137,11 @@ public sealed class MainViewModel : ObservableObject, IUpdateHost
             StatusText = DescribeLoad(presets);
         }
 
+        if (Machines.Load() is { } machinesProblem)
+        {
+            StatusText = machinesProblem;
+        }
+
         if (settings.Error is not null || settings.Warnings.Count > 0)
         {
             StatusText = $"Settings file problem: {settings.Error ?? string.Join(" ", settings.Warnings)} Using defaults where needed. ({SettingsPath})";
@@ -122,25 +153,135 @@ public sealed class MainViewModel : ObservableObject, IUpdateHost
     /// <summary>Filtered and sorted view of <see cref="Rows"/> that the grid binds to.</summary>
     public ListCollectionView RowsView { get; }
 
-    public bool CanWrite { get; }
+    public MachinesViewModel Machines { get; }
+
+    /// <summary>Changes can be applied to the computer shown (elevated locally, not --read-only, and connected).</summary>
+    public bool CanWrite => _target?.CanWrite ?? false;
 
     public bool IsReadOnly => !CanWrite;
 
-    public string ReadOnlyReason { get; }
+    public string ReadOnlyReason => _target?.ReadOnlyReason ?? string.Empty;
 
-    public string ModeText => CanWrite ? "Administrator · changes enabled" : "Read-only · preview only";
+    public string ModeText => IsRemoteTarget
+        ? ConnectionState switch
+        {
+            ConnectionState.Connecting => "Remote · connecting…",
+            ConnectionState.Failed => "Remote · not connected",
+            _ => CanWrite ? "Remote · changes enabled" : "Remote · read-only",
+        }
+        : CanWrite ? "Administrator · changes enabled" : "Read-only · preview only";
 
     public string ApplyToolTip => CanWrite
-        ? "Write the pending changes to the registry. A .reg backup of the current settings is saved first."
-        : $"{ReadOnlyReason} Run CryptoFixer as Administrator to apply changes.";
+        ? IsRemoteTarget
+            ? $"Write the pending changes to the registry of {TargetName}. A .reg backup of its current settings is saved on this PC first."
+            : "Write the pending changes to the registry. A .reg backup of the current settings is saved first."
+        : _target is null
+            ? $"Not connected to {TargetName}."
+            : IsRemoteTarget
+                ? $"{ReadOnlyReason} Start CryptoFixer without --read-only to apply changes to remote machines."
+                : $"{ReadOnlyReason} Run CryptoFixer as Administrator to apply changes.";
 
     public string BackupFolder { get; }
 
-    public string OsSummary => _os.Summary;
+    public string OsSummary => _target?.Os.Summary ?? (IsConnecting ? "Connecting…" : "Not connected");
 
-    public string DefaultsSummary => $"OS defaults shown for {OsDefaults.DescribeDefaultsFamily(_os.Build)}";
+    public string DefaultsSummary => _target is { } target
+        ? $"OS defaults shown for {OsDefaults.DescribeDefaultsFamily(target.Os.Build)}"
+        : _currentMachine.Details;
 
-    public string RegistryPath => $@"HKEY_LOCAL_MACHINE\{SchannelPaths.Protocols}";
+    public string RegistryPath => _target?.RegistryPath ?? $@"\\{_currentMachine.Host}\HKEY_LOCAL_MACHINE\{SchannelPaths.Protocols}";
+
+    // ---- Machine shown ----
+
+    public bool IsRemoteTarget => _currentMachine.IsRemote;
+
+    public bool HasTarget => _target is not null;
+
+    /// <summary>"This computer" or the remote machine's display name.</summary>
+    public string TargetName => _currentMachine.Name;
+
+    public string TargetDetail => IsRemoteTarget ? _currentMachine.Details : _localTarget.HostName;
+
+    /// <summary>Names the computer in backups, presets and dialogs, e.g. "web01 (10.0.0.5)".</summary>
+    private string TargetLabel => _target is null || _target.IsLocal
+        ? _localTarget.HostName
+        : string.Equals(TargetName, _target.HostName, StringComparison.OrdinalIgnoreCase) ? _target.HostName : $"{TargetName} ({_target.HostName})";
+
+    public ConnectionState ConnectionState
+    {
+        get => _connectionState;
+        private set
+        {
+            if (SetProperty(ref _connectionState, value))
+            {
+                OnPropertyChanged(nameof(IsConnecting));
+                OnPropertyChanged(nameof(IsConnectionFailed));
+                OnPropertyChanged(nameof(ShowOverlay));
+            }
+        }
+    }
+
+    public bool IsConnecting => ConnectionState == ConnectionState.Connecting;
+
+    public bool IsConnectionFailed => ConnectionState == ConnectionState.Failed;
+
+    /// <summary>Heading of the table overlay: "Connecting", "Couldn't connect", "Connection lost" or "Restarting".</summary>
+    public string ConnectionTitle
+    {
+        get => _connectionTitle;
+        private set => SetProperty(ref _connectionTitle, value);
+    }
+
+    public string ConnectionMessage
+    {
+        get => _connectionMessage;
+        private set => SetProperty(ref _connectionMessage, value);
+    }
+
+    /// <summary>Technical detail of a failed connection (error code and original text).</summary>
+    public string? ConnectionDetail
+    {
+        get => _connectionDetail;
+        private set
+        {
+            if (SetProperty(ref _connectionDetail, value))
+            {
+                OnPropertyChanged(nameof(HasConnectionDetail));
+            }
+        }
+    }
+
+    public bool HasConnectionDetail => !string.IsNullOrEmpty(ConnectionDetail);
+
+    /// <summary>A remote read, write, backup or restart is running.</summary>
+    public bool IsBusy
+    {
+        get => _isBusy;
+        private set
+        {
+            if (SetProperty(ref _isBusy, value))
+            {
+                OnPropertyChanged(nameof(ShowOverlay));
+                CommandManager.InvalidateRequerySuggested();
+            }
+        }
+    }
+
+    public string BusyText
+    {
+        get => _busyText;
+        private set => SetProperty(ref _busyText, value);
+    }
+
+    /// <summary>Covers the protocol table while connecting, after a failed connection, or during a remote operation.</summary>
+    public bool ShowOverlay => IsBusy || ConnectionState != ConnectionState.Ready;
+
+    public ICommand RetryConnectCommand { get; }
+
+    public ICommand EditCurrentMachineCommand { get; }
+
+    /// <summary>Also cancels a connection attempt.</summary>
+    public ICommand BackToLocalCommand { get; }
 
     public int PendingCount
     {
@@ -170,21 +311,36 @@ public sealed class MainViewModel : ObservableObject, IUpdateHost
         private set => SetProperty(ref _statusText, value);
     }
 
-    public bool RestartRequired
-    {
-        get => _restartRequired;
-        private set
-        {
-            if (SetProperty(ref _restartRequired, value))
-            {
-                OnPropertyChanged(nameof(RestartNotice));
-            }
-        }
-    }
+    /// <summary>Changes were applied to the computer shown and it hasn't been restarted from CryptoFixer since (tracked per computer).</summary>
+    public bool RestartRequired => _restartPending.Contains(TargetKey);
+
+    private string TargetKey => IsRemoteTarget ? _currentMachine.Host.Trim() : LocalKey;
 
     public string RestartNotice => RestartRequired
-        ? "Changes were written to the registry. Restart Windows to activate them (restarting affected services alone is not sufficient for all applications)."
-        : "Schannel reads these settings when Windows starts. Any change takes effect only after Windows is restarted.";
+        ? IsRemoteTarget
+            ? $"Changes were written to the registry of {TargetName}. Restart {TargetName} to activate them."
+            : "Changes were written to the registry. Restart Windows to activate them (restarting affected services alone is not sufficient for all applications)."
+        : IsRemoteTarget
+            ? $"Schannel reads these settings when Windows starts. Changes take effect only after {TargetName} is restarted."
+            : "Schannel reads these settings when Windows starts. Any change takes effect only after Windows is restarted.";
+
+    public string RestartButtonText => IsRemoteTarget ? $"Restart {TargetName}…" : "Restart Windows…";
+
+    private void MarkRestartRequired(bool required)
+    {
+        if (required)
+        {
+            _restartPending.Add(TargetKey);
+        }
+        else
+        {
+            _restartPending.Remove(TargetKey);
+        }
+
+        OnPropertyChanged(nameof(RestartRequired));
+        OnPropertyChanged(nameof(RestartNotice));
+        CommandManager.InvalidateRequerySuggested();
+    }
 
     // ---- Filtering and sorting ----
 
@@ -354,7 +510,12 @@ public sealed class MainViewModel : ObservableObject, IUpdateHost
 
     public bool PresetsFileExists => File.Exists(PresetsPath);
 
-    public IReadOnlyList<ProtocolPreset> BuiltInPresetList { get; }
+    /// <summary>Built-in presets for the computer shown (e.g. TLS 1.3 only where its OS supports it).</summary>
+    public IReadOnlyList<ProtocolPreset> BuiltInPresetList
+    {
+        get => _builtInPresets;
+        private set => SetProperty(ref _builtInPresets, value);
+    }
 
     public IReadOnlyList<ProtocolPreset> UserPresets
     {
@@ -407,6 +568,18 @@ public sealed class MainViewModel : ObservableObject, IUpdateHost
     public bool ConfirmClose() =>
         _closingForUpdate || !CanWrite || !HasPendingChanges ||
         _dialogs.Confirm("Discard pending changes?", $"You have {PendingSummary.ToLowerInvariant()} that were not applied. Exit anyway?");
+
+    /// <summary>Closes the remote connection when the window closes.</summary>
+    public void Shutdown()
+    {
+        _switchGeneration++;
+        _connectCancellation?.Cancel();
+        if (_target is { IsLocal: false } remote)
+        {
+            _target = null;
+            remote.Dispose();
+        }
+    }
 
     /// <summary>Column header click: ascending, then descending, then back to protocol version order.</summary>
     public void SortByColumn(ProtocolSortKey key)
@@ -485,20 +658,30 @@ public sealed class MainViewModel : ObservableObject, IUpdateHost
         ApplyView();
     }
 
-    private void Reload()
+    private void PopulateRows(IReadOnlyList<ProtocolRoleState> states)
     {
-        _states = _store.ReadAll(_os.Build);
+        _states = states;
         Rows.Clear();
         foreach (var protocol in ProtocolCatalog.All)
         {
-            var server = _states.Single(s => s.Protocol == protocol && s.Role == ProtocolRole.Server);
-            var client = _states.Single(s => s.Protocol == protocol && s.Role == ProtocolRole.Client);
+            var server = states.Single(s => s.Protocol == protocol && s.Role == ProtocolRole.Server);
+            var client = states.Single(s => s.Protocol == protocol && s.Role == ProtocolRole.Client);
             Rows.Add(new ProtocolRowViewModel(
                 protocol,
                 new ProtocolCellViewModel(server, OnCellChanged),
                 new ProtocolCellViewModel(client, OnCellChanged)));
         }
 
+        BuiltInPresetList = BuiltInPresets.For(states);
+        OnCellChanged();
+        UpdateVisibleCount();
+    }
+
+    private void ClearRows()
+    {
+        _states = [];
+        Rows.Clear();
+        BuiltInPresetList = [];
         OnCellChanged();
         UpdateVisibleCount();
     }
@@ -509,27 +692,313 @@ public sealed class MainViewModel : ObservableObject, IUpdateHost
         CommandManager.InvalidateRequerySuggested();
     }
 
-    private void Refresh()
+    private async void Refresh()
     {
+        if (_target is null)
+        {
+            TrySwitch(_currentMachine, force: true);
+            return;
+        }
+
         if (HasPendingChanges && !_dialogs.Confirm("Refresh", "Refreshing discards your pending changes. Continue?"))
         {
             return;
         }
 
-        Reload();
-        StatusText = $"Reloaded settings from the registry at {DateTime.Now:T}.";
+        if (await TryReloadAsync())
+        {
+            StatusText = IsRemoteTarget
+                ? $"Reloaded the settings of {TargetName} at {DateTime.Now:T}."
+                : $"Reloaded settings from the registry at {DateTime.Now:T}.";
+        }
     }
 
-    private void Discard()
+    private async void Discard()
     {
-        Reload();
+        if (_target is { IsLocal: false })
+        {
+            // Restore the values read when connecting or last refreshing, without another round trip.
+            PopulateRows(_states);
+        }
+        else if (!await TryReloadAsync())
+        {
+            return;
+        }
+
         StatusText = "Pending changes discarded.";
+    }
+
+    /// <summary>Re-reads the computer shown. A failed remote read shows the connection error instead of the table.</summary>
+    private async Task<bool> TryReloadAsync()
+    {
+        if (_target is not { } target)
+        {
+            return false;
+        }
+
+        try
+        {
+            var states = await RunAsync(target, $"Reading the Schannel settings of {TargetName}…", () => target.Store.ReadAll(target.Os.Build));
+            if (!ReferenceEquals(target, _target))
+            {
+                return false;
+            }
+
+            PopulateRows(states);
+            return true;
+        }
+        catch (Exception ex) when (!target.IsLocal)
+        {
+            if (ReferenceEquals(target, _target))
+            {
+                ShowConnectionFailed(_currentMachine, ex, "Connection lost");
+            }
+
+            return false;
+        }
+    }
+
+    /// <summary>Runs <paramref name="work"/> inline for the local registry, or on a worker thread behind the busy overlay for a remote one.</summary>
+    private async Task<T> RunAsync<T>(SchannelTarget target, string busyText, Func<T> work)
+    {
+        if (target.IsLocal)
+        {
+            return work();
+        }
+
+        BusyText = busyText;
+        IsBusy = true;
+        try
+        {
+            return await Task.Run(work);
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    private Task RunAsync(SchannelTarget target, string busyText, Action work) =>
+        RunAsync(target, busyText, () =>
+        {
+            work();
+            return true;
+        });
+
+    // ---- Machines ----
+
+    bool IMachineHost.RequestSwitch(MachineItemViewModel machine) => TrySwitch(machine);
+
+    bool IMachineHost.ReleaseMachine(MachineItemViewModel machine) =>
+        !ReferenceEquals(machine, _currentMachine) || TrySwitch(Machines.Local);
+
+    void IMachineHost.MachineEdited(MachineItemViewModel machine, bool connectionChanged)
+    {
+        if (!ReferenceEquals(machine, _currentMachine))
+        {
+            return;
+        }
+
+        RaiseTargetChanged();
+        if (connectionChanged && !TrySwitch(machine, force: true))
+        {
+            if (_target is not null)
+            {
+                machine.SetStatus(MachineStatus.Connected, "Still connected with the previous connection settings.");
+            }
+
+            StatusText = $"The new connection settings of {machine.Name} are used the next time you connect to it.";
+        }
+    }
+
+    void IMachineHost.ReportStatus(string message) => StatusText = message;
+
+    /// <summary>Shows <paramref name="machine"/>: asks to discard pending changes and for a password if needed, then connects.</summary>
+    /// <param name="force">Reconnect even when the machine is already shown.</param>
+    private bool TrySwitch(MachineItemViewModel machine, bool force = false)
+    {
+        if (IsBusy)
+        {
+            StatusText = "Wait until the current operation finishes before switching machines.";
+            return false;
+        }
+
+        if (!force && ReferenceEquals(machine, _currentMachine) && ConnectionState != ConnectionState.Failed)
+        {
+            return true;
+        }
+
+        if (HasPendingChanges)
+        {
+            var action = ReferenceEquals(machine, _currentMachine) ? "Reconnecting" : $"Switching to {machine.Name}";
+            if (!_dialogs.Confirm("Discard pending changes?",
+                    $"You have {PendingSummary.ToLowerInvariant()} for {TargetName} that weren't applied. {action} discards them. Continue?"))
+            {
+                return false;
+            }
+        }
+
+        SecureString? password = null;
+        if (machine.IsRemote && !Machines.TryGetPassword(machine, out password))
+        {
+            StatusText = $"Not connected to {machine.Name}: no password was entered.";
+            return false;
+        }
+
+        _ = SwitchToAsync(machine, password);
+        return true;
+    }
+
+    private async Task SwitchToAsync(MachineItemViewModel machine, SecureString? password)
+    {
+        var generation = ++_switchGeneration;
+        _connectCancellation?.Cancel();
+        _connectCancellation = null;
+
+        var previous = _currentMachine;
+        if (!ReferenceEquals(previous, machine) && previous.Status is MachineStatus.Connected or MachineStatus.Connecting && previous.IsRemote)
+        {
+            previous.SetStatus(MachineStatus.Unknown);
+        }
+
+        if (_target is { IsLocal: false } previousTarget)
+        {
+            previousTarget.Dispose();
+        }
+
+        _target = null;
+        _currentMachine = machine;
+        Machines.SetSelected(machine);
+        ClearRows();
+
+        if (machine.IsLocal)
+        {
+            _target = _localTarget;
+            ConnectionState = ConnectionState.Ready;
+            RaiseTargetChanged();
+            PopulateRows(_localTarget.Store.ReadAll(_localTarget.Os.Build));
+            StatusText = $"Showing this computer ({_localTarget.HostName}).";
+            return;
+        }
+
+        var entry = machine.Entry!;
+        var readOnly = !_remote.AllowWrites;
+        var cancellation = new CancellationTokenSource();
+        _connectCancellation = cancellation;
+        ConnectionTitle = "Connecting";
+        ConnectionMessage = $"Connecting to {entry.Name} ({entry.Host}) over {entry.ProtocolLabel}…";
+        ConnectionDetail = null;
+        ConnectionState = ConnectionState.Connecting;
+        machine.SetStatus(MachineStatus.Connecting);
+        RaiseTargetChanged();
+        StatusText = ConnectionMessage;
+
+        IRemoteSession session;
+        IReadOnlyList<ProtocolRoleState> states;
+        try
+        {
+            (session, states) = await Task.Run(() =>
+            {
+                var opened = _remote.Connector.Connect(entry, password, readOnly, cancellation.Token);
+                try
+                {
+                    return (opened, new SchannelProtocolStore(opened.Registry).ReadAll(opened.Os.Build));
+                }
+                catch
+                {
+                    opened.Dispose();
+                    throw;
+                }
+            });
+        }
+        catch (Exception ex)
+        {
+            cancellation.Dispose();
+            if (generation == _switchGeneration)
+            {
+                _connectCancellation = null;
+                ShowConnectionFailed(machine, ex, "Couldn't connect");
+            }
+
+            return;
+        }
+
+        if (generation != _switchGeneration)
+        {
+            // The user picked another machine meanwhile.
+            session.Dispose();
+            cancellation.Dispose();
+            return;
+        }
+
+        _connectCancellation = null;
+        _target = SchannelTarget.Remote(entry, session, cancellation, _remote.AllowWrites, _remote.ReadOnlyReason);
+        machine.PasswordRejected = false;
+        machine.SetStatus(MachineStatus.Connected, $"Connected at {DateTime.Now:T} · {session.Os.Summary}");
+        ConnectionState = ConnectionState.Ready;
+        RaiseTargetChanged();
+        PopulateRows(states);
+        StatusText = CanWrite
+            ? $"Connected to {entry.Name} ({entry.Host}). Stage changes, then click Apply changes; nothing is written until you apply."
+            : $"Connected to {entry.Name} ({entry.Host}) read-only. {ReadOnlyReason}";
+    }
+
+    private void ShowConnectionFailed(MachineItemViewModel machine, Exception ex, string title)
+    {
+        var failure = ex switch
+        {
+            RemoteAccessException remote => remote.Failure,
+            OperationCanceledException => new RemoteFailure(RemoteFailureKind.Other, "The connection attempt was cancelled.", null),
+            _ => new RemoteFailure(RemoteFailureKind.Other, $"Reading the Schannel settings of {machine.Host} failed: {ex.Message}", ex.GetType().FullName),
+        };
+
+        if (failure.Kind == RemoteFailureKind.LogonFailure)
+        {
+            MachinesViewModel.MarkPasswordRejected(machine);
+        }
+
+        if (_target is { IsLocal: false } broken)
+        {
+            _target = null;
+            broken.Dispose();
+        }
+
+        ClearRows();
+        ConnectionTitle = title;
+        ConnectionMessage = failure.Message;
+        ConnectionDetail = failure.Detail;
+        ConnectionState = ConnectionState.Failed;
+        machine.SetStatus(MachineStatus.Error, failure.Detail is null ? failure.Message : $"{failure.Message}\n\n{failure.Detail}");
+        RaiseTargetChanged();
+        StatusText = $"{title} ({machine.Name}, {machine.Host}): {failure.Message}";
+    }
+
+    private static readonly string[] TargetProperties =
+    [
+        nameof(CanWrite), nameof(IsReadOnly), nameof(ReadOnlyReason), nameof(ModeText), nameof(ApplyToolTip), nameof(OsSummary),
+        nameof(DefaultsSummary), nameof(RegistryPath), nameof(IsRemoteTarget), nameof(HasTarget), nameof(TargetName), nameof(TargetDetail),
+        nameof(RestartRequired), nameof(RestartNotice), nameof(RestartButtonText),
+    ];
+
+    private void RaiseTargetChanged()
+    {
+        foreach (var name in TargetProperties)
+        {
+            OnPropertyChanged(name);
+        }
+
+        CommandManager.InvalidateRequerySuggested();
     }
 
     // ---- Presets ----
 
     private void StagePreset(ProtocolPreset preset)
     {
+        if (_target is null)
+        {
+            return;
+        }
+
         var plan = PresetPlanner.Plan(preset, _states);
         var changed = 0;
         foreach (var target in plan.Targets)
@@ -559,7 +1028,9 @@ public sealed class MainViewModel : ObservableObject, IUpdateHost
 
         if (HasPendingChanges)
         {
-            message.Append(CanWrite ? " Review and click Apply changes." : " Preview only: run as Administrator to apply.");
+            message.Append(CanWrite
+                ? " Review and click Apply changes."
+                : IsRemoteTarget ? " Preview only: the connection is read-only." : " Preview only: run as Administrator to apply.");
         }
 
         StatusText = message.ToString();
@@ -567,6 +1038,11 @@ public sealed class MainViewModel : ObservableObject, IUpdateHost
 
     private void SavePreset()
     {
+        if (_target is not { } target)
+        {
+            return;
+        }
+
         if (PresetsError is not null && File.Exists(PresetsPath))
         {
             if (!_dialogs.Confirm(
@@ -590,7 +1066,8 @@ public sealed class MainViewModel : ObservableObject, IUpdateHost
             }
         }
 
-        var details = _dialogs.AskPresetDetails($"{Environment.MachineName} {DateTime.Now:yyyy-MM-dd}", PresetsPath, PresetFile.ValidateName);
+        var suggestedName = target.IsLocal ? target.HostName : TargetName;
+        var details = _dialogs.AskPresetDetails($"{suggestedName} {DateTime.Now:yyyy-MM-dd}", PresetsPath, PresetFile.ValidateName);
         if (details is null)
         {
             return;
@@ -605,7 +1082,7 @@ public sealed class MainViewModel : ObservableObject, IUpdateHost
         var settings = Rows
             .SelectMany(r => new[] { r.Server, r.Client })
             .Select(c => new PresetEntry(c.State.Protocol, c.State.Role, c.Selected));
-        var preset = ProtocolPreset.Capture(details.Name, details.Description, settings, DateTimeOffset.Now, $"{Environment.MachineName}, {_os.Summary}", out var skipped);
+        var preset = ProtocolPreset.Capture(details.Name, details.Description, settings, DateTimeOffset.Now, $"{TargetLabel}, {target.Os.Summary}", out var skipped);
 
         var presets = UserPresets.ToList();
         var index = existing is null ? -1 : presets.IndexOf(existing);
@@ -707,14 +1184,16 @@ public sealed class MainViewModel : ObservableObject, IUpdateHost
 
     // ---- Apply / backup ----
 
-    private void Apply()
+    private async void Apply()
     {
         var changes = GetPendingChanges();
-        if (changes.Count == 0 || !CanWrite)
+        if (changes.Count == 0 || !CanWrite || _target is not { } target)
         {
             return;
         }
 
+        var remote = !target.IsLocal;
+        var label = TargetLabel;
         var warnings = ChangeAdvisor.GetWarnings(_states, changes);
         var message = new StringBuilder();
         message.AppendLine($"Write {changes.Count} change(s) to {RegistryPath}?");
@@ -735,9 +1214,13 @@ public sealed class MainViewModel : ObservableObject, IUpdateHost
         }
 
         message.AppendLine();
-        message.AppendLine($"A backup of the current settings will first be saved to:\n{BackupFolder}");
+        message.AppendLine(remote
+            ? $"A backup of the current settings of {label} will first be saved on this PC to:\n{BackupFolder}"
+            : $"A backup of the current settings will first be saved to:\n{BackupFolder}");
         message.AppendLine();
-        message.Append("Windows must be restarted for the changes to take effect.");
+        message.Append(remote
+            ? $"{TargetName} must be restarted for the changes to take effect."
+            : "Windows must be restarted for the changes to take effect.");
 
         if (!_dialogs.Confirm("Apply changes", message.ToString(), isWarning: warnings.Count > 0))
         {
@@ -747,7 +1230,8 @@ public sealed class MainViewModel : ObservableObject, IUpdateHost
         string backupPath;
         try
         {
-            backupPath = WriteBackup(Path.Combine(BackupFolder, DefaultBackupFileName()));
+            var path = Path.Combine(BackupFolder, DefaultBackupFileName(target));
+            backupPath = await RunAsync(target, $"Backing up the settings of {TargetName}…", () => WriteBackup(target, label, path));
         }
         catch (Exception ex)
         {
@@ -757,41 +1241,65 @@ public sealed class MainViewModel : ObservableObject, IUpdateHost
 
         try
         {
-            _store.Apply(changes);
+            await RunAsync(target, $"Writing {changes.Count} change(s) to {TargetName}…", () => target.Store.Apply(changes));
         }
         catch (Exception ex)
         {
-            Reload();
+            await TryReloadAsync();
             StatusText = $"Applying failed. Backup: {backupPath}";
             _dialogs.ShowError("Apply failed",
-                $"Writing to the registry failed: {ex.Message}\n\nSome changes may already have been written. " +
-                $"The previous settings can be restored from:\n{backupPath}");
+                $"Writing to the registry{(remote ? $" of {label}" : string.Empty)} failed: {ex.Message}\n\nSome changes may already have been written. " +
+                $"The previous settings can be restored from:\n{backupPath}" +
+                (remote ? $"\n\nImport that file on {label} itself; importing it on this PC would change this PC." : string.Empty));
             return;
         }
 
-        Reload();
-        RestartRequired = true;
-        StatusText = $"Applied {changes.Count} change(s). Backup saved to {backupPath}. Restart Windows to activate the changes.";
+        var reloaded = await TryReloadAsync();
+        MarkRestartRequired(true);
+        StatusText = remote
+            ? $"Applied {changes.Count} change(s) to {label}. Backup saved to {backupPath}. Restart {TargetName} to activate the changes."
+            : $"Applied {changes.Count} change(s). Backup saved to {backupPath}. Restart Windows to activate the changes.";
 
-        if (_dialogs.Confirm("Restart required",
-                $"{changes.Count} change(s) were applied.\nBackup: {backupPath}\n\n" +
-                "Schannel only picks up protocol changes after a restart. Restart Windows now?"))
+        if (!reloaded || !ReferenceEquals(target, _target))
+        {
+            return;
+        }
+
+        if (remote)
+        {
+            if (_dialogs.Confirm("Restart required",
+                    $"{changes.Count} change(s) were applied to {label}.\nBackup (on this PC): {backupPath}\n\n" +
+                    $"Schannel only picks up protocol changes after a restart. Restart {label} now?\n\n" +
+                    "It restarts about 10 seconds after you confirm; users and services on it are disconnected."))
+            {
+                await RestartRemoteAsync(target);
+            }
+        }
+        else if (_dialogs.Confirm("Restart required",
+                     $"{changes.Count} change(s) were applied.\nBackup: {backupPath}\n\n" +
+                     "Schannel only picks up protocol changes after a restart. Restart Windows now?"))
         {
             _system.RestartComputer();
         }
     }
 
-    private void ExportBackup()
+    private async void ExportBackup()
     {
-        var path = _dialogs.PickSaveFile(BackupFolder, DefaultBackupFileName());
+        if (_target is not { } target)
+        {
+            return;
+        }
+
+        var path = _dialogs.PickSaveFile(BackupFolder, DefaultBackupFileName(target));
         if (path is null)
         {
             return;
         }
 
+        var label = TargetLabel;
         try
         {
-            WriteBackup(path);
+            await RunAsync(target, $"Exporting the settings of {TargetName}…", () => WriteBackup(target, label, path));
             StatusText = $"Backup exported to {path}.";
         }
         catch (Exception ex)
@@ -800,15 +1308,66 @@ public sealed class MainViewModel : ObservableObject, IUpdateHost
         }
     }
 
-    private void Restart()
+    private async void Restart()
     {
-        if (_dialogs.Confirm("Restart Windows", "Restart Windows now to activate the Schannel changes? Save your work in other applications first.", isWarning: true))
+        if (_target is not { } target || !CanWrite)
         {
-            _system.RestartComputer();
+            return;
+        }
+
+        if (target.IsLocal)
+        {
+            if (_dialogs.Confirm("Restart Windows", "Restart Windows now to activate the Schannel changes? Save your work in other applications first.", isWarning: true))
+            {
+                _system.RestartComputer();
+            }
+
+            return;
+        }
+
+        if (_dialogs.Confirm($"Restart {TargetName}",
+                $"Restart {TargetLabel} now to activate the Schannel changes?\n\n" +
+                "It restarts about 10 seconds after you confirm. Users and services on it are disconnected, and unsaved work there is lost.",
+                isWarning: true))
+        {
+            await RestartRemoteAsync(target);
         }
     }
 
-    private string WriteBackup(string path)
+    private async Task RestartRemoteAsync(SchannelTarget target)
+    {
+        var machine = _currentMachine;
+        var label = TargetLabel;
+        try
+        {
+            await RunAsync(target, $"Asking {machine.Name} to restart…", () => target.Session!.Restart(RemoteRestartComment));
+        }
+        catch (Exception ex)
+        {
+            _dialogs.ShowError("Restart failed", $"{label} couldn't be restarted: {ex.Message}");
+            return;
+        }
+
+        MarkRestartRequired(false);
+        StatusText = $"Restart requested for {label} at {DateTime.Now:T}.";
+        if (!ReferenceEquals(target, _target))
+        {
+            return;
+        }
+
+        // The connection drops while it restarts; reconnect later to check the result.
+        _target = null;
+        target.Dispose();
+        ClearRows();
+        ConnectionTitle = "Restarting";
+        ConnectionMessage = $"{machine.Name} is restarting. Click Try again once it's back online to check the new settings.";
+        ConnectionDetail = null;
+        ConnectionState = ConnectionState.Failed;
+        machine.SetStatus(MachineStatus.Unknown);
+        RaiseTargetChanged();
+    }
+
+    private static string WriteBackup(SchannelTarget target, string label, string path)
     {
         var directory = Path.GetDirectoryName(path);
         if (!string.IsNullOrEmpty(directory))
@@ -816,13 +1375,13 @@ public sealed class MainViewModel : ObservableObject, IUpdateHost
             Directory.CreateDirectory(directory);
         }
 
-        var content = RegFileExporter.ExportProtocols(_store.Registry, DateTimeOffset.Now, Environment.MachineName);
+        var content = RegFileExporter.ExportProtocols(target.Store.Registry, DateTimeOffset.Now, label, isRemote: !target.IsLocal);
         RegFileExporter.WriteFile(path, content);
         return path;
     }
 
-    private static string DefaultBackupFileName() =>
-        $"Schannel-Protocols-{Environment.MachineName}-{DateTime.Now:yyyyMMdd-HHmmss}.reg";
+    private static string DefaultBackupFileName(SchannelTarget target) =>
+        $"Schannel-Protocols-{target.FileNameHost}-{DateTime.Now:yyyyMMdd-HHmmss}.reg";
 
     private sealed class RowComparer(ProtocolRowComparer inner) : IComparer
     {

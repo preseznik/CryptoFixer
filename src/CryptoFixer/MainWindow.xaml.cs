@@ -4,6 +4,7 @@ using System.Windows.Automation;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Input;
+using System.Windows.Media.Animation;
 using System.Windows.Threading;
 using CryptoFixer.Core.Presets;
 using CryptoFixer.Core.Schannel;
@@ -44,22 +45,89 @@ public partial class MainWindow : Window
         base.OnClosing(e);
     }
 
+    protected override void OnClosed(EventArgs e)
+    {
+        _vm?.Shutdown();
+        base.OnClosed(e);
+    }
+
+    /// <summary>Right-click opens the item's menu without selecting it, because selecting a machine connects to it.</summary>
+    private void OnMachineListPreviewRightButtonDown(object sender, MouseButtonEventArgs e) => e.Handled = true;
+
+    private void OnMachinesPropertyChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName == nameof(MachinesViewModel.IsPanelOpen))
+        {
+            UpdateMachinesPanel(animate: true);
+        }
+    }
+
+    private const double MachinesPanelWidth = 272;
+
+    /// <summary>Slides the machines panel in from the left, or out and then collapses it so it leaves the tab order.</summary>
+    private void UpdateMachinesPanel(bool animate)
+    {
+        var open = _vm?.Machines.IsPanelOpen == true;
+        var target = open ? MachinesPanelWidth : 0;
+
+        if (!animate)
+        {
+            MachinesPanel.BeginAnimation(WidthProperty, null);
+            MachinesPanel.Width = target;
+            MachinesPanel.Visibility = open ? Visibility.Visible : Visibility.Collapsed;
+            return;
+        }
+
+        if (open)
+        {
+            MachinesPanel.Visibility = Visibility.Visible;
+        }
+
+        var animation = new DoubleAnimation(target, TimeSpan.FromSeconds(open ? 0.18 : 0.15))
+        {
+            EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut },
+        };
+        animation.Completed += (_, _) =>
+        {
+            // A later toggle may have replaced this animation; only finish if the state still matches.
+            if (_vm?.Machines.IsPanelOpen != open)
+            {
+                return;
+            }
+
+            MachinesPanel.BeginAnimation(WidthProperty, null);
+            MachinesPanel.Width = target;
+            if (open)
+            {
+                Dispatcher.BeginInvoke(() => MachineFilterBox.Focus(), DispatcherPriority.Input);
+            }
+            else
+            {
+                MachinesPanel.Visibility = Visibility.Collapsed;
+            }
+        };
+        MachinesPanel.BeginAnimation(WidthProperty, animation, HandoffBehavior.SnapshotAndReplace);
+    }
+
     private void OnDataContextChanged(object sender, DependencyPropertyChangedEventArgs e)
     {
         if (_vm is not null)
         {
             _vm.PropertyChanged -= OnViewModelPropertyChanged;
+            _vm.Machines.PropertyChanged -= OnMachinesPropertyChanged;
         }
 
         _vm = DataContext as MainViewModel;
         if (_vm is not null)
         {
             _vm.PropertyChanged += OnViewModelPropertyChanged;
+            _vm.Machines.PropertyChanged += OnMachinesPropertyChanged;
         }
 
         UpdateColumnVisibility();
         UpdateSortArrows();
         ApplyDisplayMode();
+        UpdateMachinesPanel(animate: false);
     }
 
     private void OnViewModelPropertyChanged(object? sender, PropertyChangedEventArgs e)
@@ -97,10 +165,13 @@ public partial class MainWindow : Window
         ProtocolColumn.CellTemplate = ResourceTemplate(compact ? "CompactProtocolCellTemplate" : "ProtocolCellTemplate");
         ServerColumn.CellTemplate = ResourceTemplate(compact ? "CompactServerCellTemplate" : "ServerCellTemplate");
         ClientColumn.CellTemplate = ResourceTemplate(compact ? "CompactClientCellTemplate" : "ClientCellTemplate");
+        ResetColumn.CellTemplate = ResourceTemplate(compact ? "CompactResetCellTemplate" : "ResetCellTemplate");
 
         ProtocolColumn.Width = new DataGridLength(compact ? 1 : 3, DataGridLengthUnitType.Star);
         ProtocolColumn.MinWidth = compact ? 258 : 220;
         ServerColumn.MinWidth = ClientColumn.MinWidth = compact ? 250 : 230;
+        // Without a minimum the grid squeezes this Auto column (clipping the link) instead of scrolling horizontally.
+        ResetColumn.MinWidth = compact ? 56 : 140;
 
         ProtocolGrid.ColumnHeaderStyle = (Style)FindResource(compact ? "CompactHeaderStyle" : "HeaderStyle");
         if (compact)

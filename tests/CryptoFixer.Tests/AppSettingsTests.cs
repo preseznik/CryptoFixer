@@ -32,9 +32,19 @@ public class AppSettingsTests
     {
         var result = AppSettingsFile.Parse(json);
 
-        Assert.Equal(TableDisplayMode.Standard, result.Settings.DisplayMode);
+        Assert.Equal(TableDisplayMode.Compact, result.Settings.DisplayMode);
         Assert.Equal(isError, result.Error is not null);
         Assert.Equal(!isError, result.Warnings.Count == 1);
+    }
+
+    [Theory]
+    [InlineData("""{ "checkForUpdates": false }""", TableDisplayMode.Compact)]
+    [InlineData("""{ "displayMode": "standard" }""", TableDisplayMode.Standard)]
+    [InlineData("""{ "displayMode": "list" }""", TableDisplayMode.List)]
+    public void Compact_is_the_default_unless_a_mode_was_saved(string json, TableDisplayMode expected)
+    {
+        Assert.Equal(TableDisplayMode.Compact, AppSettingsLoadResult.Missing.Settings.DisplayMode);
+        Assert.Equal(expected, AppSettingsFile.Parse(json).Settings.DisplayMode);
     }
 
     [Theory]

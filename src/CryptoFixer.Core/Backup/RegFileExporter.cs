@@ -14,7 +14,8 @@ public static class RegFileExporter
     /// Enabled/DisabledByDefault value is absent, a deletion line ("Name"=-) is added so that importing the
     /// backup also removes values created later and restores the exact original state.
     /// </summary>
-    public static string ExportProtocols(IRegistryAccess registry, DateTimeOffset timestamp, string? machineName = null)
+    /// <param name="isRemote">The registry belongs to another computer; the restore note then warns against importing the file locally.</param>
+    public static string ExportProtocols(IRegistryAccess registry, DateTimeOffset timestamp, string? machineName = null, bool isRemote = false)
     {
         ArgumentNullException.ThrowIfNull(registry);
 
@@ -24,10 +25,13 @@ public static class RegFileExporter
         sb.Append(CultureInfo.InvariantCulture, $"; Created {timestamp:yyyy-MM-dd HH:mm:ss zzz}");
         if (!string.IsNullOrEmpty(machineName))
         {
-            sb.Append(CultureInfo.InvariantCulture, $" on {machineName}");
+            sb.Append(CultureInfo.InvariantCulture, $" on {(isRemote ? "remote computer " : string.Empty)}{machineName}");
         }
 
-        sb.Append("\r\n; Restore: run 'reg import <this file>' as Administrator (or double-click it), then restart Windows.\r\n\r\n");
+        sb.Append(isRemote
+            ? "\r\n; Restore ON THAT COMPUTER: copy this file there, run 'reg import <this file>' as Administrator, then restart it." +
+              "\r\n; Importing it on any other computer changes that computer instead.\r\n\r\n"
+            : "\r\n; Restore: run 'reg import <this file>' as Administrator (or double-click it), then restart Windows.\r\n\r\n");
 
         var managed = ProtocolCatalog.All
             .SelectMany(p => new[] { SchannelPaths.RoleKey(p, ProtocolRole.Server), SchannelPaths.RoleKey(p, ProtocolRole.Client) })

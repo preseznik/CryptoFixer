@@ -12,19 +12,24 @@ HKLM\SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL\Protocols\<Prot
 
 Protocols covered: PCT 1.0, Multi-Protocol Unified Hello, SSL 2.0, SSL 3.0, TLS 1.0, TLS 1.1, TLS 1.2, TLS 1.3, DTLS 1.0, DTLS 1.2.
 
+It works on the local computer and on **remote machines** (over WinRM or DCOM; see [Remote machines](#remote-machines)).
+
 **Download:** get `CryptoFixer-win-x64.exe` (or the zip) from the [latest release](https://github.com/preseznik/CryptoFixer/releases/latest). It is a single self-contained exe: no installer and no .NET runtime needed. The exe isn't code-signed, so Windows SmartScreen may warn the first time you run it (*More info* → *Run anyway*). You can check the download against the `.sha256` file published with the release.
 
-![Main window, standard view, with the Modern preset staged](docs/screenshot.png)
+![Main window, compact view, with the machines panel open and the Modern preset staged](docs/screenshot.png)
 
-| Compact view | List view |
+| Compact view (default) | Standard view |
 |---|---|
-| ![Compact view](docs/screenshot-compact.png) | ![List view](docs/screenshot-list.png) |
+| ![Compact view](docs/screenshot-compact.png) | ![Standard view](docs/screenshot-standard.png) |
+| **List view** | **Remote machine (read-only connection)** |
+| ![List view](docs/screenshot-list.png) | ![Remote machine](docs/screenshot-remote.png) |
 
 ## Requirements
 
 - Windows Server 2016 or later, or Windows 10/11. Older builds also work, and their OS defaults are shown.
 - **Administrator rights** to make changes. The executable asks for elevation (UAC). Without elevation it opens **read-only**.
 - **A restart is required** before Schannel protocol changes take effect.
+- For remote machines: WinRM (or DCOM) access to the target and administrator rights there. See [Remote machines](#remote-machines).
 - No installer and no .NET runtime: the release is one self-contained `CryptoFixer.exe` (see [Installing on a server](#installing-on-a-server)).
 - To build: the .NET 10 SDK. Self-contained builds don't need a .NET runtime on the server.
 
@@ -73,10 +78,10 @@ The toolbar above the table narrows and orders the protocol list. Filters only c
 Use **View** (right of the result count) to switch how the protocols are shown. Search, filters, sorting and staged changes work the same in every mode.
 
 - **Standard**: the full table with descriptions and the full pending-change text under each setting.
-- **Compact**: one line per protocol, with smaller text and short labels (for example `Enabled · OS default` or `Enabled → Disabled`). The description and raw registry values are in tooltips.
+- **Compact** (the default): one line per protocol, with smaller text and short labels (for example `Enabled · OS default` or `Enabled → Disabled`, and *Reset* for *Reset to OS default*). The description and raw registry values are in tooltips. When the window is narrow, for example with the machines panel open, long labels are shortened with "…"; hover over a cell for the full text.
 - **List**: one card per protocol with the description, its Server and Client settings side by side, and a *pending change* badge. List has no column headers, so sort with the **Sort** drop-down.
 
-The selected mode is remembered in `CryptoFixer.settings.json` next to the executable (see [Portable files](#portable-files)).
+The selected mode is remembered in `CryptoFixer.settings.json` next to the executable (see [Portable files](#portable-files)). Compact is used when no mode has been saved yet, for example on a new install; a saved choice always wins.
 
 ### Presets
 
@@ -137,8 +142,9 @@ CryptoFixer keeps its own files next to `CryptoFixer.exe` (resolved from the exe
 |---|---|---|
 | `CryptoFixer.presets.json` | Your saved presets | When you save the first preset, or with *Create presets file…* |
 | `CryptoFixer.settings.json` | `{ "formatVersion": 1, "displayMode": "standard" \| "compact" \| "list", "checkForUpdates": true \| false }` | When you change the display mode or the update check setting |
+| `CryptoFixer.machines.json` | Your remote machines (see [Remote machines](#remote-machines)); passwords only DPAPI-encrypted | When you add the first machine |
 
-A missing file means "no presets" or "default settings". A corrupt settings file is reported in the status line, and the app uses the defaults (Standard view, update check on) without overwriting the file until you change a setting. The folder must be writable for saving. If it isn't, the app tells you and keeps working.
+A missing file means "no presets", "default settings" or "no remote machines". A corrupt settings file is reported in the status line, and the app uses the defaults (Compact view, update check on) without overwriting the file until you change a setting. The folder must be writable for saving. If it isn't, the app tells you and keeps working.
 
 ### Restoring a backup
 
@@ -150,9 +156,11 @@ reg import "$env:USERPROFILE\Documents\CryptoFixer\Backups\Schannel-Protocols-<m
 
 Then restart Windows.
 
+A backup of a remote machine is saved **on this PC** and named after it (`Schannel-Protocols-<host>-<timestamp>.reg`). The file uses plain `HKEY_LOCAL_MACHINE` paths, so copy it to that machine and run the same `reg import` there, then restart it.
+
 ### Read-only mode
 
-Start with `--read-only` (or `/readonly`) to view the configuration without allowing changes, even when elevated. The app also opens read-only when it runs without administrator rights. In read-only mode the registry layer itself refuses writes.
+Start with `--read-only` (or `/readonly`) to view the configuration without allowing changes, even when elevated. The app also opens read-only when it runs without administrator rights. In read-only mode the registry layer itself refuses writes. `--read-only` also makes every remote connection read-only.
 
 You can still stage settings and presets to preview their effect, and you can save presets. **Apply changes…** and the restart prompt are disabled.
 
@@ -172,6 +180,79 @@ CryptoFixer updates itself from the [public releases of this repository](https:/
 - **When it can't update itself**, for example when the exe's folder isn't writable (such as `Program Files` without elevation) or you run a development build, the dialog offers the release page instead so you can replace the exe by hand.
 - **Trust.** The SHA-256 check protects against corrupted or incomplete downloads. It is not a signature: both files come from the same GitHub release, so it can't detect a compromised release. The exe isn't code-signed, which is also why SmartScreen may warn about it.
 - Updating works in read-only mode too. It never changes the Schannel registry settings.
+
+## Remote machines
+
+![Connection error with an explanation](docs/screenshot-remote-error.png)
+
+Click **☰** (left of the title) or press **Ctrl+M** to slide out the **Machines** panel. Click ✕ or press Esc to close it (in the filter box, Esc clears the filter first).
+
+- **This computer** is always first and can't be removed.
+- **Select a machine** to connect and show its settings. The header shows which computer you are looking at; a blue chip means a remote machine. Everything works as it does locally: search, filters, sorting, presets, staging, **Apply changes…**, backups, OS defaults (detected from the remote Windows build) and the restart prompt. Switching machines with staged changes asks before discarding them.
+- **Add…** opens a dialog for the host name or IP address, a display name, the connection type and the credentials. **Edit…** (or F2) changes an entry. **Remove** (or Delete) asks first. Right-click an entry for *Connect*, *Edit…* and *Remove…*.
+- **Filter** matches the name, host name or IP address.
+- **Sort** by *Name* or *IP address*. IP sorting is numeric: IPv4 addresses octet by octet (so `192.0.2.4` comes before `192.0.2.15`), then IPv6 addresses, then host names alphabetically.
+- **Status dot**: grey = not connected yet, amber = connecting, green = connected, red = failed. Hover over an entry for details.
+
+If a connection fails, the table area explains why and offers *Try again*, *Edit connection…* and *Back to this computer*. The app recognises access denied, wrong user name or password, WinRM not reachable or firewalled, host not found, no response, Kerberos not usable (IP addresses and non-domain targets), HTTPS certificate problems, and DCOM/RPC not reachable.
+
+### Connections and credentials
+
+CryptoFixer uses **CIM/WMI** (the `StdRegProv` registry provider) to read and write the same `SCHANNEL\Protocols` values on the target. Connection types:
+
+| Connection | Port | Notes |
+|---|---|---|
+| **WinRM (HTTP)**, recommended | 5985 | On by default on Windows Server 2012 and later. Traffic is encrypted by Kerberos/NTLM. |
+| **WinRM (HTTPS)** | 5986 | Needs an HTTPS listener with a certificate the client trusts. Use it for IP addresses and computers outside your domain. |
+| **DCOM** | 135 plus dynamic RPC ports | Fallback for computers without WinRM. Usually blocked by firewalls. |
+
+Credentials are either **your current Windows account** (Kerberos single sign-on) or **another account** (`DOMAIN\user`, `user@domain` or `.\user` for a local account on the target) with a password.
+
+- **Passwords are never stored in plain text.** If you tick *Save the password (encrypted)*, it is encrypted with Windows **DPAPI** for the current user and stored in `CryptoFixer.machines.json`. Only the same Windows user on the same PC can decrypt it. Anywhere else (another PC, or another user) CryptoFixer asks for the password again instead of failing.
+- Unsaved passwords are kept in memory until CryptoFixer closes. Passwords are never shown or logged.
+- If the target rejects the user name or password, the next attempt asks for it again.
+- The current Windows account can't be replaced by other credentials for `localhost`; that is a WMI rule.
+
+### Prerequisites on the target
+
+- **Administrator rights** on the target for the account you connect with. By default, WinRM and remote WMI only accept administrators.
+- **WinRM enabled** (default on Windows Server 2012+). If it isn't, run `Enable-PSRemoting` (or `winrm quickconfig`) on the target. Allow TCP 5985 (and 5986 for HTTPS) in its firewall.
+- **IP addresses and non-domain computers.** Kerberos only works with domain computer names. For an IP address, or a computer outside your domain, either use **WinRM (HTTPS)**, or add the target to the WinRM **TrustedHosts** list on *this* computer and connect with a user name and password (NTLM), for example:
+
+  ```powershell
+  Set-Item WSMan:\localhost\Client\TrustedHosts -Value 10.0.0.5 -Concatenate
+  ```
+
+  CryptoFixer never changes TrustedHosts, WinRM, the firewall or any other system configuration; it tells you what to change.
+- **Local accounts** (not domain accounts) in the Administrators group are filtered by UAC over the network. Use the built-in Administrator account or a domain account, or set `LocalAccountTokenFilterPolicy=1` on the target (`HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System`); know the security trade-off first.
+- **DCOM**: allow *Windows Management Instrumentation (DCOM-In)* and the WMI rules in the target's firewall.
+
+### Applying changes remotely
+
+- Before writing, CryptoFixer saves a `.reg` backup of the target's `Protocols` tree **on this PC**, named after the target (see [Restoring a backup](#restoring-a-backup)). If the backup fails, nothing is applied.
+- After applying, it offers to **restart the remote machine** (Win32_OperatingSystem `Win32ShutdownTracker`: a planned, forced restart after about 10 seconds with a comment in the event log). You can also restart later with the *Restart &lt;name&gt;…* button in the restart notice.
+- Whether you can apply changes to a remote machine depends on the account used for the connection, not on whether CryptoFixer runs elevated. `--read-only` makes every connection read-only.
+
+### Machine list file
+
+`CryptoFixer.machines.json` sits next to the exe, like the presets:
+
+```jsonc
+{
+  "formatVersion": 1,
+  "machines": [
+    { "name": "web01", "host": "10.0.0.5", "protocol": "wsman", "credential": "current" },
+    { "name": "db01", "host": "db01.contoso.com", "protocol": "wsman-https",
+      "credential": { "userName": "CONTOSO\\admin", "protectedPassword": "AQAAANCMnd8B…" } }
+  ]
+}
+```
+
+- `protocol` is `wsman`, `wsman-https` or `dcom`.
+- `credential` is `"current"` or an object with `userName` and an optional DPAPI-encrypted `protectedPassword`. A plain-text `password` value is ignored (with a warning), and CryptoFixer asks for the password instead.
+- Copying the file to another PC copies the machine list, but saved passwords won't decrypt there and are asked for again.
+
+![Add remote machine dialog](docs/screenshot-machine-dialog.png)
 
 ## OS defaults
 
@@ -202,6 +283,8 @@ The Unified Hello defaults are inferred from the documentation and not stated in
 - Covers Schannel **protocols** only. It does not change cipher, hash or key-exchange settings (`SCHANNEL\Ciphers`, `Hashes`, `KeyExchangeAlgorithms`), cipher suite order, or .NET Framework `SchUseStrongCrypto`/`SystemDefaultTlsVersions`. Those could be added later. Microsoft recommends managing cipher suites through cipher suite order (Group Policy or `Enable-TlsCipherSuite`/`Disable-TlsCipherSuite`).
 - Settings deployed by Group Policy or configuration management may overwrite changes made here.
 - Changing protocol settings can break connectivity, including RDP, which uses TLS. Keep console or out-of-band access when hardening remote servers.
+- Remote machines are handled one at a time; there is no bulk apply across several machines. WinRM itself doesn't depend on Schannel over HTTP (5985), so disabling TLS versions doesn't lock CryptoFixer out of a machine. Over HTTPS (5986) it does use TLS.
+- The machine list sort order (Name or IP address) isn't saved; it starts sorted by name.
 
 ## Build, test and publish
 
@@ -263,7 +346,7 @@ Copy `CryptoFixer.exe` (or unzip the package) to any folder, for example `C:\Too
 
 On first start the exe unpacks a few native WPF DLLs to `%TEMP%\.net\CryptoFixer\`. If policy blocks DLLs in `%TEMP%` (for example AppLocker), set the `DOTNET_BUNDLE_EXTRACT_BASE_DIR` environment variable to an allowed folder.
 
-To carry your presets and view setting along, copy `CryptoFixer.presets.json` and `CryptoFixer.settings.json` into the same folder as the exe.
+To carry your presets, view setting and machine list along, copy `CryptoFixer.presets.json`, `CryptoFixer.settings.json` and `CryptoFixer.machines.json` into the same folder as the exe. Saved passwords in the machine list only decrypt for the Windows user who saved them on the PC where they were saved; elsewhere CryptoFixer asks for them again.
 
 The app targets **.NET 10 (LTS)**. .NET 8 reached end of support on 10 November 2026.
 
@@ -272,7 +355,8 @@ The app targets **.NET 10 (LTS)**. .NET 8 reached end of support on 10 November 
 ```
 src/CryptoFixer.Core    Registry abstraction, protocol catalog, OS defaults, state evaluation, apply logic, .reg export,
                         search/filter/sort (Schannel/ProtocolQuery), presets (Presets/), portable settings (Settings/),
-                        GitHub release check, verified download and exe swap (Updates/)
+                        GitHub release check, verified download and exe swap (Updates/),
+                        remote machines: machine list, IP sorting, DPAPI, CIM/StdRegProv registry, error mapping (Remote/)
 src/CryptoFixer         WPF app (MVVM), app.manifest (requireAdministrator), Assets/CryptoFixer.ico
 tests/CryptoFixer.Tests xUnit tests
 scripts/publish.ps1     Release build and packaging

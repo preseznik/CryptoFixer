@@ -1,13 +1,28 @@
 using System.Diagnostics;
 using System.IO;
+using System.Security;
 using System.Security.Principal;
 using System.Windows;
+using CryptoFixer.Core.Remote;
 using CryptoFixer.Core.Updates;
 using Microsoft.Win32;
 
 namespace CryptoFixer.Services;
 
 public sealed record PresetDetails(string Name, string? Description);
+
+/// <summary>Input from the add/edit machine dialog.</summary>
+/// <param name="Password">Only set when a password was typed; when editing, null keeps the saved password.</param>
+public sealed record MachineDialogResult(
+    string Name,
+    string Host,
+    RemoteProtocol Protocol,
+    bool UseCurrentAccount,
+    string? UserName,
+    SecureString? Password,
+    bool SavePassword);
+
+public sealed record PasswordPromptResult(SecureString Password, bool SavePassword);
 
 /// <param name="InstallBlocker">Why the update can't be installed automatically; the dialog then offers the download page instead.</param>
 /// <param name="PendingWarning">Shown when restarting would discard staged changes.</param>
@@ -36,6 +51,12 @@ public interface IDialogService
     PresetDetails? AskPresetDetails(string suggestedName, string filePath, Func<string, string?> validateName);
 
     UpdateDecision ShowUpdate(UpdateOffer offer);
+
+    /// <summary>Add (<paramref name="existing"/> is null) or edit a remote machine. <paramref name="validate"/> returns an error message or null.</summary>
+    MachineDialogResult? EditMachine(MachineEntry? existing, string filePath, Func<MachineDialogResult, string?> validate);
+
+    /// <summary>Asks for the password of <paramref name="machine"/>'s account. <paramref name="reason"/> explains why, e.g. an undecryptable saved password.</summary>
+    PasswordPromptResult? AskPassword(MachineEntry machine, string? reason);
 }
 
 public interface ISystemActions
@@ -95,6 +116,18 @@ public sealed class DialogService : IDialogService
         var dialog = new UpdateDialog(offer) { Owner = Owner() };
         dialog.ShowDialog();
         return dialog.Decision;
+    }
+
+    public MachineDialogResult? EditMachine(MachineEntry? existing, string filePath, Func<MachineDialogResult, string?> validate)
+    {
+        var dialog = new MachineDialog(existing, filePath, validate) { Owner = Owner() };
+        return dialog.ShowDialog() == true ? dialog.Result : null;
+    }
+
+    public PasswordPromptResult? AskPassword(MachineEntry machine, string? reason)
+    {
+        var dialog = new PasswordPromptDialog(machine, reason) { Owner = Owner() };
+        return dialog.ShowDialog() == true ? dialog.Result : null;
     }
 
     private static Window Owner() => Application.Current.MainWindow;
