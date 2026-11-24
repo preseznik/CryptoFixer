@@ -255,7 +255,7 @@ gh release create v1.1.0 --title "CryptoFixer 1.1.0" --notes "…" `
   dist\CryptoFixer-win-x64.exe dist\CryptoFixer-1.1.0-win-x64.zip dist\CryptoFixer-1.1.0-win-x64.sha256
 ```
 
-The updater looks for exactly `CryptoFixer-<runtime>.exe` and a `.sha256` asset that lists it, and refuses releases whose tag isn't a version number.
+The updater looks for exactly `CryptoFixer-<runtime>.exe` and a `.sha256` asset that lists it, and refuses releases whose tag isn't a version number. The update dialog shows the release notes as plain text, so keep Markdown formatting in them light (plain lists read fine; `**bold**` shows its asterisks).
 
 ### Installing on a server
 
