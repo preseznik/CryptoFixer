@@ -1,0 +1,28 @@
+<Window x:Class="CryptoFixer.SavePresetDialog"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Save preset" Width="480" SizeToContent="Height" ResizeMode="NoResize"
+        WindowStartupLocation="CenterOwner" ShowInTaskbar="False"
+        Background="{StaticResource SurfaceBrush}" FontFamily="Segoe UI" FontSize="13" Foreground="#1F2328"
+        UseLayoutRounding="True">
+    <StackPanel Margin="22,18,22,18">
+        <TextBlock TextWrapping="Wrap" Foreground="{StaticResource MutedTextBrush}"
+                   Text="Saves the setting selected for every protocol (including staged changes) as a preset. Loading a preset later only stages its settings; nothing is written until you click Apply changes." />
+
+        <TextBlock Text="Name" FontWeight="SemiBold" Margin="0,14,0,4" />
+        <TextBox x:Name="NameBox" Padding="6,5" MaxLength="80" AutomationProperties.Name="Preset name" />
+
+        <TextBlock Text="Description (optional)" FontWeight="SemiBold" Margin="0,12,0,4" />
+        <TextBox x:Name="DescriptionBox" Padding="6,5" Height="58" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto"
+                 AutomationProperties.Name="Preset description" />
+
+        <TextBlock x:Name="ErrorText" Foreground="#CF222E" Margin="0,8,0,0" TextWrapping="Wrap" Visibility="Collapsed" />
+
+        <TextBlock x:Name="FileText" Foreground="{StaticResource MutedTextBrush}" FontSize="11.5" TextWrapping="Wrap" Margin="0,12,0,0" />
+
+        <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,16,0,0">
+            <Button Content="Save preset" IsDefault="True" Style="{StaticResource PrimaryButtonStyle}" Click="OnSave" />
+            <Button Content="Cancel" IsCancel="True" />
+        </StackPanel>
+    </StackPanel>
+</Window>

@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>Assets\CryptoFixer.ico</ApplicationIcon>
+    <AssemblyTitle>CryptoFixer - Schannel protocol manager</AssemblyTitle>
+    <Description>Shows and changes which Schannel (SSL/TLS/DTLS) protocols Windows enables for server and client connections.</Description>
+    <RootNamespace>CryptoFixer</RootNamespace>
+    <!-- The UI is English only; leaving out the framework's translated resources keeps the published exe smaller. -->
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\CryptoFixer.Core\CryptoFixer.Core.csproj" />
+  </ItemGroup>
+
+</Project>
