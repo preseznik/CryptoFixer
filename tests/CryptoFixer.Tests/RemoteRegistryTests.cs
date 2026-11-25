@@ -210,7 +210,7 @@ public class CimRegistryAccessTests
         var os = WindowsVersionInfo.Read(remote, fallbackBuild: 0);
         var remoteStates = new SchannelProtocolStore(remote).ReadAll(os.Build);
         var directStates = new SchannelProtocolStore(_provider.Registry).ReadAll(os.Build);
-        var backup = RegFileExporter.ExportProtocols(remote, DateTimeOffset.Now, "srv01", isRemote: true);
+        var backup = RegFileExporter.Export(remote, DateTimeOffset.Now, "srv01", isRemote: true);
 
         Assert.Equal((20348, 2700, true), (os.Build, os.Revision, os.IsServer));
         Assert.Equal(directStates, remoteStates);
@@ -220,6 +220,43 @@ public class CimRegistryAccessTests
 
         new SchannelProtocolStore(remote).Apply([new PendingChange(ProtocolCatalog.Tls10, ProtocolRole.Server, ConfiguredSetting.NotConfigured)]);
         Assert.Null(_provider.Registry.GetValue(SchannelPaths.RoleKey(ProtocolCatalog.Tls10, ProtocolRole.Server), "Enabled"));
+    }
+
+    [Fact]
+    public void Cipher_key_names_with_slashes_are_sent_whole_to_CreateKey_and_SetDWORDValue()
+    {
+        var remote = Create();
+        var store = new SchannelProtocolStore(remote);
+
+        store.Apply([new AlgorithmChange(AlgorithmCatalog.Rc4_128, ConfiguredSetting.Disabled)]);
+
+        var expectedKey = @"SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL\Ciphers\RC4 128/128";
+        Assert.Equal(["CreateKey", "SetDWORDValue"], _provider.Calls.Select(c => c.Method));
+        Assert.All(_provider.Calls, c => Assert.Equal(expectedKey, c.Inputs["sSubKeyName"]));
+        Assert.Equal(0u, Assert.IsType<uint>(_provider.Calls[1].Inputs["uValue"]));
+        Assert.Equal(["RC4 128/128"], _provider.Registry.GetSubKeyNames(SchannelPaths.AlgorithmFolder(AlgorithmCategory.Cipher)));
+
+        var state = store.ReadAllAlgorithms(20348).Single(s => s.Algorithm == AlgorithmCatalog.Rc4_128);
+        Assert.Equal(ConfiguredSetting.Disabled, state.Configured);
+
+        _provider.Calls.Clear();
+        store.Apply([new AlgorithmChange(AlgorithmCatalog.Rc4_128, ConfiguredSetting.NotConfigured)]);
+        Assert.Equal("DeleteValue", Assert.Single(_provider.Calls).Method);
+        Assert.Null(_provider.Registry.GetValue(expectedKey, "Enabled"));
+    }
+
+    [Fact]
+    public void Reading_algorithms_lists_each_folder_once_and_skips_missing_keys()
+    {
+        _provider.Registry.SetDWord(SchannelPaths.AlgorithmKey(AlgorithmCatalog.TripleDes168), "Enabled", 0);
+        var remote = Create();
+
+        var states = new SchannelProtocolStore(remote).ReadAllAlgorithms(20348);
+
+        Assert.Equal(0u, states.Single(s => s.Algorithm == AlgorithmCatalog.TripleDes168).Enabled);
+        Assert.Equal(3, _provider.Calls.Count(c => c.Method == "EnumKey"));
+        var valueReads = _provider.Calls.Where(c => c.Method != "EnumKey").Select(c => (string)c.Inputs["sSubKeyName"]).Distinct().ToList();
+        Assert.Equal([SchannelPaths.AlgorithmKey(AlgorithmCatalog.TripleDes168)], valueReads);
     }
 }
 

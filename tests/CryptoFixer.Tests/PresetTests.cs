@@ -246,4 +246,171 @@ public class PresetTests
     {
         Assert.Equal(valid, PresetFile.ValidateName(name) is null);
     }
+
+    private static IReadOnlyList<AlgorithmState> ReadAlgorithms(InMemoryRegistry registry, int build) =>
+        new SchannelProtocolStore(registry).ReadAllAlgorithms(build);
+
+    [Fact]
+    public void Algorithm_settings_round_trip_as_format_version_2()
+    {
+        var preset = new ProtocolPreset("No 3DES", [new PresetEntry(ProtocolCatalog.Tls10, ProtocolRole.Server, ConfiguredSetting.Disabled)])
+        {
+            Algorithms =
+            [
+                new AlgorithmPresetEntry(AlgorithmCatalog.TripleDes168, ConfiguredSetting.Disabled),
+                new AlgorithmPresetEntry(AlgorithmCatalog.Rc4_128, ConfiguredSetting.Disabled),
+                new AlgorithmPresetEntry(AlgorithmCatalog.Aes256, ConfiguredSetting.Enabled),
+                new AlgorithmPresetEntry(AlgorithmCatalog.Md5, ConfiguredSetting.NotConfigured),
+                new AlgorithmPresetEntry(AlgorithmCatalog.DiffieHellman, ConfiguredSetting.Enabled),
+            ],
+        };
+
+        var json = PresetFile.Serialize([preset]);
+        var result = PresetFile.Parse(json);
+
+        Assert.Contains("\"formatVersion\": 2", json, StringComparison.Ordinal);
+        Assert.Contains("\"Triple DES 168\": \"disabled\"", json, StringComparison.Ordinal);
+        Assert.Contains("\"RC4 128/128\": \"disabled\"", json, StringComparison.Ordinal);
+        Assert.Contains("\"hashes\"", json, StringComparison.Ordinal);
+        Assert.Contains("\"keyExchange\"", json, StringComparison.Ordinal);
+        Assert.Null(result.Error);
+        Assert.Empty(result.Warnings);
+        var loaded = Assert.Single(result.Presets);
+        Assert.Equal(preset.Entries, loaded.Entries);
+        Assert.Equal(ProtocolPreset.Normalize(preset.Algorithms), loaded.Algorithms);
+    }
+
+    [Fact]
+    public void Protocol_only_presets_are_still_written_and_read_as_format_version_1()
+    {
+        const string v1 = """
+            {
+              "formatVersion": 1,
+              "presets": [ { "name": "Old", "protocols": { "TLS 1.0": "disabled" } } ]
+            }
+            """;
+
+        var result = PresetFile.Parse(v1);
+
+        Assert.Null(result.Error);
+        Assert.Empty(result.Warnings);
+        var preset = Assert.Single(result.Presets);
+        Assert.Empty(preset.Algorithms);
+        Assert.Equal(2, preset.Entries.Count);
+        Assert.Contains("\"formatVersion\": 1", PresetFile.Serialize([preset]), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Algorithm_sections_are_lenient_and_report_what_they_skipped()
+    {
+        const string json = """
+            {
+              "formatVersion": 2,
+              "presets": [
+                {
+                  "name": "Edited",
+                  "ciphers": { "rc4 128/128": "off", " AES 128/128 ": "Enabled", "Blowfish": "disabled", "NULL": "maybe" },
+                  "hashes": "none",
+                  "keyExchange": { "diffie-hellman": "default" }
+                }
+              ]
+            }
+            """;
+
+        var result = PresetFile.Parse(json);
+
+        Assert.Null(result.Error);
+        var preset = Assert.Single(result.Presets);
+        Assert.Equal(
+            [
+                new AlgorithmPresetEntry(AlgorithmCatalog.Rc4_128, ConfiguredSetting.Disabled),
+                new AlgorithmPresetEntry(AlgorithmCatalog.Aes128, ConfiguredSetting.Enabled),
+                new AlgorithmPresetEntry(AlgorithmCatalog.DiffieHellman, ConfiguredSetting.NotConfigured),
+            ],
+            preset.Algorithms);
+        foreach (var fragment in new[] { "unknown cipher \"Blowfish\" skipped", "invalid value \"maybe\"", "\"hashes\" must be an object" })
+        {
+            Assert.Contains(result.Warnings, w => w.Contains(fragment, StringComparison.Ordinal));
+        }
+
+        Assert.DoesNotContain(result.Warnings, w => w.Contains("changes nothing", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData(Server2022)]
+    [InlineData(22621)]
+    public void Modern_preset_disables_weak_ciphers_keeps_aes_and_leaves_hashes_alone(int build)
+    {
+        var store = new SchannelProtocolStore(new InMemoryRegistry());
+        var states = store.ReadAll(build);
+        var algorithms = store.ReadAllAlgorithms(build);
+        var preset = BuiltIn(states, BuiltInPresets.ModernName);
+
+        Assert.Equal(AlgorithmCatalog.Ciphers, preset.Algorithms.Select(e => e.Algorithm));
+        Assert.All(preset.Algorithms, e =>
+            Assert.Equal(e.Algorithm.IsDeprecated ? ConfiguredSetting.Disabled : ConfiguredSetting.Enabled, e.Setting));
+        Assert.Equal(["AES 128/128", "AES 256/256"],
+            preset.Algorithms.Where(e => e.Setting == ConfiguredSetting.Enabled).Select(e => e.Algorithm.KeyName));
+
+        var plan = PresetPlanner.Plan(preset, states, algorithms);
+        var changes = plan.DifferencesFrom(algorithms);
+        Assert.Equal(13, changes.Count);
+        Assert.Empty(ChangeAdvisor.GetWarnings(algorithms, changes));
+
+        store.Apply(changes);
+        var after = store.ReadAllAlgorithms(build);
+        Assert.Empty(PresetPlanner.Plan(preset, states, after).DifferencesFrom(after));
+        Assert.All(after.Where(s => s.Algorithm.Category == AlgorithmCategory.Cipher), s =>
+            Assert.Equal(s.Algorithm.IsDeprecated ? EffectiveState.Disabled : EffectiveState.Enabled, s.Effective));
+        Assert.All(after.Where(s => s.Algorithm.Category != AlgorithmCategory.Cipher), s => Assert.False(s.IsExplicitlyConfigured));
+    }
+
+    [Fact]
+    public void Os_defaults_preset_resets_configured_algorithms_but_keeps_key_sizes()
+    {
+        var registry = new InMemoryRegistry();
+        var dh = SchannelPaths.AlgorithmKey(AlgorithmCatalog.DiffieHellman);
+        registry.SetDWord(SchannelPaths.AlgorithmKey(AlgorithmCatalog.TripleDes168), "Enabled", 0);
+        registry.SetDWord(SchannelPaths.AlgorithmKey(AlgorithmCatalog.Sha1), "Enabled", 0xFFFFFFFF);
+        registry.SetDWord(dh, "ServerMinKeyBitLength", 3072);
+        registry.SetDWord(dh, "Enabled", 1);
+        var store = new SchannelProtocolStore(registry);
+        var states = store.ReadAll(Server2022);
+        var algorithms = store.ReadAllAlgorithms(Server2022);
+
+        var preset = BuiltIn(states, BuiltInPresets.OsDefaultsName);
+        var changes = PresetPlanner.Plan(preset, states, algorithms).DifferencesFrom(algorithms);
+
+        Assert.Equal(AlgorithmCatalog.All.Count, preset.Algorithms.Count);
+        Assert.Equal([AlgorithmCatalog.TripleDes168, AlgorithmCatalog.Sha1, AlgorithmCatalog.DiffieHellman], changes.Select(c => c.Algorithm));
+        Assert.All(changes, c => Assert.Equal(ConfiguredSetting.NotConfigured, c.Target));
+
+        store.Apply(changes);
+        Assert.All(store.ReadAllAlgorithms(Server2022), s => Assert.False(s.IsExplicitlyConfigured));
+        Assert.Equal(3072u, Convert.ToUInt32(registry.GetValue(dh, "ServerMinKeyBitLength")?.Data));
+    }
+
+    [Fact]
+    public void Capture_with_algorithms_drops_custom_values_and_orders_by_catalog()
+    {
+        var preset = ProtocolPreset.Capture("Lab", null, [],
+            [
+                new AlgorithmPresetEntry(AlgorithmCatalog.Aes256, ConfiguredSetting.Enabled),
+                new AlgorithmPresetEntry(AlgorithmCatalog.Des56, ConfiguredSetting.Custom),
+                new AlgorithmPresetEntry(AlgorithmCatalog.Rc4_40, ConfiguredSetting.Disabled),
+            ],
+            DateTimeOffset.UnixEpoch, null, out _);
+
+        Assert.Equal([AlgorithmCatalog.Rc4_40, AlgorithmCatalog.Aes256], preset.Algorithms.Select(e => e.Algorithm));
+    }
+
+    [Fact]
+    public void Planner_ignores_algorithm_entries_without_a_current_state()
+    {
+        var states = Read(new InMemoryRegistry(), Server2022);
+        var preset = BuiltIn(states, BuiltInPresets.ModernName);
+
+        Assert.Empty(PresetPlanner.Plan(preset, states).AlgorithmTargets);
+        Assert.Equal(13, PresetPlanner.Plan(preset, states, ReadAlgorithms(new InMemoryRegistry(), Server2022)).AlgorithmTargets.Count);
+    }
 }

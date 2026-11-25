@@ -6,22 +6,34 @@ using Microsoft.Win32;
 
 namespace CryptoFixer.Core.Backup;
 
-/// <summary>Creates regedit-compatible (version 5.00) backups of the Schannel protocol settings.</summary>
+/// <summary>Creates regedit-compatible (version 5.00) backups of the Schannel protocol and algorithm settings.</summary>
 public static class RegFileExporter
 {
+    private static readonly string[] ProtocolValues = [SchannelPaths.EnabledValue, SchannelPaths.DisabledByDefaultValue];
+    private static readonly string[] AlgorithmValues = [SchannelPaths.EnabledValue];
+
+    /// <summary>The SCHANNEL trees included in a backup.</summary>
+    public static IReadOnlyList<string> ExportedRoots { get; } =
+    [
+        SchannelPaths.Protocols,
+        SchannelPaths.AlgorithmFolder(AlgorithmCategory.Cipher),
+        SchannelPaths.AlgorithmFolder(AlgorithmCategory.Hash),
+        SchannelPaths.AlgorithmFolder(AlgorithmCategory.KeyExchange),
+    ];
+
     /// <summary>
-    /// Exports the whole SCHANNEL\Protocols tree. For every protocol role managed by this tool whose
-    /// Enabled/DisabledByDefault value is absent, a deletion line ("Name"=-) is added so that importing the
-    /// backup also removes values created later and restores the exact original state.
+    /// Exports the SCHANNEL\Protocols, Ciphers, Hashes and KeyExchangeAlgorithms trees. For every protocol role or
+    /// algorithm managed by this tool whose Enabled/DisabledByDefault value is absent, a deletion line ("Name"=-) is
+    /// added so that importing the backup also removes values created later and restores the exact original state.
     /// </summary>
     /// <param name="isRemote">The registry belongs to another computer; the restore note then warns against importing the file locally.</param>
-    public static string ExportProtocols(IRegistryAccess registry, DateTimeOffset timestamp, string? machineName = null, bool isRemote = false)
+    public static string Export(IRegistryAccess registry, DateTimeOffset timestamp, string? machineName = null, bool isRemote = false)
     {
         ArgumentNullException.ThrowIfNull(registry);
 
         var sb = new StringBuilder();
         sb.Append("Windows Registry Editor Version 5.00\r\n\r\n");
-        sb.Append("; CryptoFixer backup of Schannel protocol settings\r\n");
+        sb.Append("; CryptoFixer backup of Schannel protocol, cipher, hash and key exchange settings\r\n");
         sb.Append(CultureInfo.InvariantCulture, $"; Created {timestamp:yyyy-MM-dd HH:mm:ss zzz}");
         if (!string.IsNullOrEmpty(machineName))
         {
@@ -33,25 +45,36 @@ public static class RegFileExporter
               "\r\n; Importing it on any other computer changes that computer instead.\r\n\r\n"
             : "\r\n; Restore: run 'reg import <this file>' as Administrator (or double-click it), then restart Windows.\r\n\r\n");
 
-        var managed = ProtocolCatalog.All
-            .SelectMany(p => new[] { SchannelPaths.RoleKey(p, ProtocolRole.Server), SchannelPaths.RoleKey(p, ProtocolRole.Client) })
-            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var managed = new Dictionary<string, string[]>(StringComparer.OrdinalIgnoreCase);
+        foreach (var protocol in ProtocolCatalog.All)
+        {
+            managed[SchannelPaths.RoleKey(protocol, ProtocolRole.Server)] = ProtocolValues;
+            managed[SchannelPaths.RoleKey(protocol, ProtocolRole.Client)] = ProtocolValues;
+        }
+
+        foreach (var algorithm in AlgorithmCatalog.All)
+        {
+            managed[SchannelPaths.AlgorithmKey(algorithm)] = AlgorithmValues;
+        }
 
         var emitted = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        if (registry.KeyExists(SchannelPaths.Protocols))
+        foreach (var root in ExportedRoots)
         {
-            WriteKeyRecursive(registry, SchannelPaths.Protocols, sb, managed, emitted);
-        }
-        else
-        {
-            WriteKeyHeader(registry, SchannelPaths.Protocols, sb);
-            sb.Append("\r\n");
+            if (registry.KeyExists(root))
+            {
+                WriteKeyRecursive(registry, root, sb, managed, emitted);
+            }
+            else
+            {
+                WriteKeyHeader(registry, root, sb);
+                sb.Append("\r\n");
+            }
         }
 
-        foreach (var key in managed.Where(k => !emitted.Contains(k)).OrderBy(k => k, StringComparer.OrdinalIgnoreCase))
+        foreach (var (key, values) in managed.Where(k => !emitted.Contains(k.Key)).OrderBy(k => k.Key, StringComparer.OrdinalIgnoreCase))
         {
             WriteKeyHeader(registry, key, sb);
-            AppendMissingManagedValueDeletions(registry, key, sb);
+            AppendMissingManagedValueDeletions(registry, key, values, sb);
             sb.Append("\r\n");
         }
 
@@ -62,7 +85,7 @@ public static class RegFileExporter
     public static void WriteFile(string path, string content) =>
         File.WriteAllText(path, content, Encoding.Unicode);
 
-    private static void WriteKeyRecursive(IRegistryAccess registry, string keyPath, StringBuilder sb, HashSet<string> managed, HashSet<string> emitted)
+    private static void WriteKeyRecursive(IRegistryAccess registry, string keyPath, StringBuilder sb, Dictionary<string, string[]> managed, HashSet<string> emitted)
     {
         WriteKeyHeader(registry, keyPath, sb);
 
@@ -75,9 +98,9 @@ public static class RegFileExporter
             }
         }
 
-        if (managed.Contains(keyPath))
+        if (managed.TryGetValue(keyPath, out var values))
         {
-            AppendMissingManagedValueDeletions(registry, keyPath, sb);
+            AppendMissingManagedValueDeletions(registry, keyPath, values, sb);
             emitted.Add(keyPath);
         }
 
@@ -92,9 +115,9 @@ public static class RegFileExporter
     private static void WriteKeyHeader(IRegistryAccess registry, string keyPath, StringBuilder sb) =>
         sb.Append('[').Append(registry.RootName).Append('\\').Append(keyPath).Append("]\r\n");
 
-    private static void AppendMissingManagedValueDeletions(IRegistryAccess registry, string keyPath, StringBuilder sb)
+    private static void AppendMissingManagedValueDeletions(IRegistryAccess registry, string keyPath, string[] names, StringBuilder sb)
     {
-        foreach (var name in new[] { SchannelPaths.EnabledValue, SchannelPaths.DisabledByDefaultValue })
+        foreach (var name in names)
         {
             if (registry.GetValue(keyPath, name) is null)
             {

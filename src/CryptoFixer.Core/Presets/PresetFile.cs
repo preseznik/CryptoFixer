@@ -15,7 +15,7 @@ public sealed record PresetFileLoadResult(IReadOnlyList<ProtocolPreset> Presets,
 /// Reads and writes the portable presets file (<see cref="FileName"/>), a human-editable JSON file that lives next to the executable:
 /// <code>
 /// {
-///   "formatVersion": 1,
+///   "formatVersion": 2,
 ///   "presets": [
 ///     {
 ///       "name": "Web servers",
@@ -23,18 +23,24 @@ public sealed record PresetFileLoadResult(IReadOnlyList<ProtocolPreset> Presets,
 ///       "protocols": {
 ///         "TLS 1.0": "disabled",                                  // both sides
 ///         "TLS 1.3": { "server": "enabled", "client": "osDefault" }
-///       }
+///       },
+///       "ciphers": { "Triple DES 168": "disabled", "AES 256/256": "enabled" },
+///       "hashes": { "MD5": "disabled" },
+///       "keyExchange": { "Diffie-Hellman": "osDefault" }
 ///     }
 ///   ]
 /// }
 /// </code>
-/// Values are "enabled", "disabled" or "osDefault" (remove the registry values). Protocols that are left out are not changed.
-/// Comments and trailing commas are accepted when reading; they are not preserved when the app saves the file.
+/// Values are "enabled", "disabled" or "osDefault" (remove the registry values). Protocols and algorithms that are left out are
+/// not changed. Version 1 files (protocols only) are read unchanged. Comments and trailing commas are accepted when reading;
+/// they are not preserved when the app saves the file.
 /// </summary>
 public static class PresetFile
 {
     public const string FileName = "CryptoFixer.presets.json";
-    public const int FormatVersion = 1;
+
+    /// <summary>The newest format this app reads and writes. Files without algorithm sections are still written as version 1.</summary>
+    public const int FormatVersion = 2;
     public const int MaxNameLength = 80;
 
     public const string EnabledToken = "enabled";
@@ -43,7 +49,19 @@ public static class PresetFile
 
     private const string HelpText =
         "CryptoFixer presets. Values: \"enabled\", \"disabled\" or \"osDefault\" (removes the registry values). " +
-        "Use one value for both sides or { \"server\": ..., \"client\": ... }. Protocols that are left out are not changed.";
+        "Use one value for both sides or { \"server\": ..., \"client\": ... }. The optional \"ciphers\", \"hashes\" and " +
+        "\"keyExchange\" sections use SCHANNEL key names, e.g. \"Triple DES 168\". Entries that are left out are not changed.";
+
+    /// <summary>JSON section name for each algorithm category.</summary>
+    public static string SectionName(AlgorithmCategory category) => category switch
+    {
+        AlgorithmCategory.Cipher => "ciphers",
+        AlgorithmCategory.Hash => "hashes",
+        AlgorithmCategory.KeyExchange => "keyExchange",
+        _ => throw new ArgumentOutOfRangeException(nameof(category), category, null),
+    };
+
+    private static readonly AlgorithmCategory[] Categories = [AlgorithmCategory.Cipher, AlgorithmCategory.Hash, AlgorithmCategory.KeyExchange];
 
     public static string DefaultPath(string baseDirectory) => Path.Combine(baseDirectory, FileName);
 
@@ -151,11 +169,12 @@ public static class PresetFile
 
         return PortableJsonFile.Write(writer =>
         {
+            var userPresets = presets.Where(p => !p.IsBuiltIn).ToList();
             writer.WriteStartObject();
-            writer.WriteNumber("formatVersion", FormatVersion);
+            writer.WriteNumber("formatVersion", userPresets.Any(p => p.Algorithms.Count > 0) ? FormatVersion : 1);
             writer.WriteString("help", HelpText);
             writer.WriteStartArray("presets");
-            foreach (var preset in presets.Where(p => !p.IsBuiltIn))
+            foreach (var preset in userPresets)
             {
                 WritePreset(writer, preset);
             }
@@ -246,9 +265,35 @@ public static class PresetFile
             warnings.Add($"Preset \"{name}\": \"protocols\" must be an object; no settings were read.");
         }
 
-        if (entries.Count == 0)
+        var algorithms = new List<AlgorithmPresetEntry>();
+        foreach (var category in Categories)
         {
-            warnings.Add($"Preset \"{name}\" has no protocol settings; loading it changes nothing.");
+            var section = SectionName(category);
+            var value = Property(item, section);
+            if (value is { ValueKind: JsonValueKind.Object } algorithmMap)
+            {
+                foreach (var property in algorithmMap.EnumerateObject())
+                {
+                    var algorithm = AlgorithmCatalog.Find(category, property.Name.Trim());
+                    if (algorithm is null)
+                    {
+                        warnings.Add($"Preset \"{name}\": unknown {AlgorithmCatalog.Noun(category)} \"{property.Name}\" skipped.");
+                    }
+                    else if (ReadSetting(name, algorithm.KeyName, property.Value, warnings) is { } setting)
+                    {
+                        algorithms.Add(new AlgorithmPresetEntry(algorithm, setting));
+                    }
+                }
+            }
+            else if (value is not null && value.Value.ValueKind != JsonValueKind.Null)
+            {
+                warnings.Add($"Preset \"{name}\": \"{section}\" must be an object; it was ignored.");
+            }
+        }
+
+        if (entries.Count == 0 && algorithms.Count == 0)
+        {
+            warnings.Add($"Preset \"{name}\" has no protocol or algorithm settings; loading it changes nothing.");
         }
 
         DateTimeOffset? savedAt = null;
@@ -263,6 +308,7 @@ public static class PresetFile
             Description = OptionalString(item, "description"),
             SavedAt = savedAt,
             SavedFrom = OptionalString(item, "savedFrom"),
+            Algorithms = ProtocolPreset.Normalize(algorithms),
         };
     }
 
@@ -366,6 +412,25 @@ public static class PresetFile
         }
 
         writer.WriteEndObject();
+
+        var algorithms = ProtocolPreset.Normalize(preset.Algorithms);
+        foreach (var category in Categories)
+        {
+            var inCategory = algorithms.Where(a => a.Algorithm.Category == category).ToList();
+            if (inCategory.Count == 0)
+            {
+                continue;
+            }
+
+            writer.WriteStartObject(SectionName(category));
+            foreach (var entry in inCategory)
+            {
+                writer.WriteString(entry.Algorithm.KeyName, ToToken(entry.Setting));
+            }
+
+            writer.WriteEndObject();
+        }
+
         writer.WriteEndObject();
     }
 

@@ -40,6 +40,31 @@ public sealed class WindowsRegistryAccessTests : IDisposable
         Assert.False(registry.KeyExists("X"));
     }
 
+    [Fact]
+    public void Slash_in_a_cipher_key_name_creates_one_key_not_a_subkey_path()
+    {
+        var registry = new WindowsRegistryAccess(RegistryHive.CurrentUser, _sandbox);
+        var store = new CryptoFixer.Core.Schannel.SchannelProtocolStore(registry);
+
+        store.Apply(
+        [
+            new CryptoFixer.Core.Schannel.AlgorithmChange(CryptoFixer.Core.Schannel.AlgorithmCatalog.Rc4_128, CryptoFixer.Core.Schannel.ConfiguredSetting.Disabled),
+            new CryptoFixer.Core.Schannel.AlgorithmChange(CryptoFixer.Core.Schannel.AlgorithmCatalog.Aes256, CryptoFixer.Core.Schannel.ConfiguredSetting.Enabled),
+        ]);
+
+        using var ciphers = Registry.CurrentUser.OpenSubKey($@"{_sandbox}\SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL\Ciphers");
+        Assert.NotNull(ciphers);
+        Assert.Equal(["AES 256/256", "RC4 128/128"], ciphers.GetSubKeyNames().Order());
+        using var rc4 = ciphers.OpenSubKey("RC4 128/128");
+        Assert.Equal(0, rc4!.GetValue("Enabled"));
+        Assert.Empty(rc4.GetSubKeyNames());
+        Assert.Null(ciphers.OpenSubKey("RC4 128"));
+
+        var states = store.ReadAllAlgorithms(20348);
+        Assert.Equal(0u, states.Single(s => s.Algorithm == CryptoFixer.Core.Schannel.AlgorithmCatalog.Rc4_128).Enabled);
+        Assert.Equal(0xFFFFFFFFu, states.Single(s => s.Algorithm == CryptoFixer.Core.Schannel.AlgorithmCatalog.Aes256).Enabled);
+    }
+
     public void Dispose()
     {
         Registry.CurrentUser.DeleteSubKeyTree(_sandbox, throwOnMissingSubKey: false);

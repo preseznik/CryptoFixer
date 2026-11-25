@@ -5,8 +5,12 @@ namespace CryptoFixer.Core.Presets;
 /// <summary>One protocol role setting inside a preset. <see cref="ConfiguredSetting.Custom"/> is never stored.</summary>
 public sealed record PresetEntry(SchannelProtocol Protocol, ProtocolRole Role, ConfiguredSetting Setting);
 
+/// <summary>One cipher, hash or key exchange setting inside a preset. <see cref="ConfiguredSetting.Custom"/> is never stored.</summary>
+public sealed record AlgorithmPresetEntry(SchannelAlgorithm Algorithm, ConfiguredSetting Setting);
+
 /// <summary>
-/// A named set of protocol settings. Protocol roles that are not listed are left unchanged when the preset is staged.
+/// A named set of protocol and algorithm settings. Protocol roles and algorithms that are not listed are left unchanged when
+/// the preset is staged.
 /// </summary>
 public sealed record ProtocolPreset(string Name, IReadOnlyList<PresetEntry> Entries)
 {
@@ -19,6 +23,9 @@ public sealed record ProtocolPreset(string Name, IReadOnlyList<PresetEntry> Entr
     /// <summary>Free text describing where the preset was captured, e.g. machine name and Windows version.</summary>
     public string? SavedFrom { get; init; }
 
+    /// <summary>Cipher, hash and key exchange settings (empty for presets saved before version 1.2).</summary>
+    public IReadOnlyList<AlgorithmPresetEntry> Algorithms { get; init; } = [];
+
     /// <summary>
     /// Captures the given settings (typically what the UI currently shows, including staged changes) as a preset.
     /// Entries with <see cref="ConfiguredSetting.Custom"/> cannot be represented and are returned in <paramref name="skipped"/>.
@@ -29,10 +36,22 @@ public sealed record ProtocolPreset(string Name, IReadOnlyList<PresetEntry> Entr
         IEnumerable<PresetEntry> settings,
         DateTimeOffset savedAt,
         string? savedFrom,
+        out IReadOnlyList<PresetEntry> skipped) =>
+        Capture(name, description, settings, [], savedAt, savedFrom, out skipped);
+
+    /// <inheritdoc cref="Capture(string, string?, IEnumerable{PresetEntry}, DateTimeOffset, string?, out IReadOnlyList{PresetEntry})"/>
+    public static ProtocolPreset Capture(
+        string name,
+        string? description,
+        IEnumerable<PresetEntry> settings,
+        IEnumerable<AlgorithmPresetEntry> algorithms,
+        DateTimeOffset savedAt,
+        string? savedFrom,
         out IReadOnlyList<PresetEntry> skipped)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(name);
         ArgumentNullException.ThrowIfNull(settings);
+        ArgumentNullException.ThrowIfNull(algorithms);
 
         var all = settings.ToList();
         skipped = all.Where(e => e.Setting == ConfiguredSetting.Custom).ToList();
@@ -41,6 +60,7 @@ public sealed record ProtocolPreset(string Name, IReadOnlyList<PresetEntry> Entr
             Description = string.IsNullOrWhiteSpace(description) ? null : description.Trim(),
             SavedAt = savedAt,
             SavedFrom = savedFrom,
+            Algorithms = Normalize(algorithms),
         };
     }
 
@@ -55,15 +75,31 @@ public sealed record ProtocolPreset(string Name, IReadOnlyList<PresetEntry> Entr
             .ThenBy(e => e.Role)
             .ToList();
     }
+
+    /// <summary>Orders algorithm entries by catalog order, drops custom settings; a later duplicate wins.</summary>
+    internal static IReadOnlyList<AlgorithmPresetEntry> Normalize(IEnumerable<AlgorithmPresetEntry> entries) =>
+        entries
+            .Where(e => e.Setting != ConfiguredSetting.Custom)
+            .GroupBy(e => e.Algorithm)
+            .Select(g => g.Last())
+            .OrderBy(e => AlgorithmCatalog.IndexOf(e.Algorithm) is var i and >= 0 ? i : int.MaxValue)
+            .ToList();
 }
 
 /// <param name="Targets">Settings to stage (including ones that already match the current state).</param>
 /// <param name="Skipped">Human-readable notes about preset entries that were not staged.</param>
 public sealed record PresetPlan(IReadOnlyList<PendingChange> Targets, IReadOnlyList<string> Skipped)
 {
+    /// <summary>Cipher, hash and key exchange settings to stage.</summary>
+    public IReadOnlyList<AlgorithmChange> AlgorithmTargets { get; init; } = [];
+
     /// <summary>Targets that differ from what is configured in the registry.</summary>
     public IReadOnlyList<PendingChange> DifferencesFrom(IReadOnlyList<ProtocolRoleState> current) =>
         Targets.Where(t => current.Any(s => s.Protocol == t.Protocol && s.Role == t.Role && s.Configured != t.Target)).ToList();
+
+    /// <summary>Algorithm targets that differ from what is configured in the registry.</summary>
+    public IReadOnlyList<AlgorithmChange> DifferencesFrom(IReadOnlyList<AlgorithmState> current) =>
+        AlgorithmTargets.Where(t => current.Any(s => s.Algorithm == t.Algorithm && s.Configured != t.Target)).ToList();
 }
 
 public static class PresetPlanner
@@ -72,10 +108,15 @@ public static class PresetPlanner
     /// Works out what staging <paramref name="preset"/> means on this machine. Enabling a protocol the OS doesn't support is skipped,
     /// so a preset captured on a newer Windows version (e.g. with TLS 1.3) can be used on older ones.
     /// </summary>
-    public static PresetPlan Plan(ProtocolPreset preset, IReadOnlyList<ProtocolRoleState> current)
+    public static PresetPlan Plan(ProtocolPreset preset, IReadOnlyList<ProtocolRoleState> current) => Plan(preset, current, []);
+
+    /// <inheritdoc cref="Plan(ProtocolPreset, IReadOnlyList{ProtocolRoleState})"/>
+    /// <param name="algorithms">Current algorithm states; algorithm entries without a state are ignored.</param>
+    public static PresetPlan Plan(ProtocolPreset preset, IReadOnlyList<ProtocolRoleState> current, IReadOnlyList<AlgorithmState> algorithms)
     {
         ArgumentNullException.ThrowIfNull(preset);
         ArgumentNullException.ThrowIfNull(current);
+        ArgumentNullException.ThrowIfNull(algorithms);
 
         var targets = new List<PendingChange>();
         var skipped = new List<string>();
@@ -96,7 +137,12 @@ public static class PresetPlanner
             targets.Add(new PendingChange(entry.Protocol, entry.Role, entry.Setting));
         }
 
-        return new PresetPlan(targets, skipped);
+        var algorithmTargets = preset.Algorithms
+            .Where(e => e.Setting != ConfiguredSetting.Custom && algorithms.Any(s => s.Algorithm == e.Algorithm))
+            .Select(e => new AlgorithmChange(e.Algorithm, e.Setting))
+            .ToList();
+
+        return new PresetPlan(targets, skipped) { AlgorithmTargets = algorithmTargets };
     }
 }
 
@@ -129,12 +175,17 @@ public static class BuiltInPresets
             {
                 IsBuiltIn = true,
                 Description = "Disables PCT, Unified Hello, SSL 2.0/3.0, TLS 1.0/1.1 and DTLS 1.0 (where DTLS 1.2 exists). " +
-                              "Enables TLS 1.2, DTLS 1.2 and TLS 1.3 where this Windows build supports them.",
+                              "Enables TLS 1.2, DTLS 1.2 and TLS 1.3 where this Windows build supports them. " +
+                              "Disables the NULL, DES, Triple DES, RC2 and RC4 ciphers and enables AES; hashes and key exchange are left unchanged.",
+                Algorithms = ProtocolPreset.Normalize(AlgorithmCatalog.Ciphers.Select(a =>
+                    new AlgorithmPresetEntry(a, a.IsDeprecated ? ConfiguredSetting.Disabled : ConfiguredSetting.Enabled))),
             },
             new ProtocolPreset(OsDefaultsName, ProtocolPreset.Normalize(osDefaults))
             {
                 IsBuiltIn = true,
-                Description = "Removes every Enabled/DisabledByDefault value so Windows uses its built-in defaults.",
+                Description = "Removes every protocol Enabled/DisabledByDefault value and every cipher, hash and key exchange Enabled value " +
+                              "so Windows uses its built-in defaults. Key size values are not touched.",
+                Algorithms = ProtocolPreset.Normalize(AlgorithmCatalog.All.Select(a => new AlgorithmPresetEntry(a, ConfiguredSetting.NotConfigured))),
             },
         ];
     }

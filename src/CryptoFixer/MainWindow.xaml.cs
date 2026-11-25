@@ -145,6 +145,9 @@ public partial class MainWindow : Window
 
             case nameof(MainViewModel.SortKey):
             case nameof(MainViewModel.SortDescending):
+            case nameof(MainViewModel.AlgorithmSortKey):
+            case nameof(MainViewModel.AlgorithmSortDescending):
+            case nameof(MainViewModel.Section):
                 // The DataGrid resets header arrows when the view's sort changes; set them once that has happened.
                 Dispatcher.BeginInvoke(UpdateSortArrows, DispatcherPriority.Loaded);
                 break;
@@ -173,14 +176,25 @@ public partial class MainWindow : Window
         // Without a minimum the grid squeezes this Auto column (clipping the link) instead of scrolling horizontally.
         ResetColumn.MinWidth = compact ? 56 : 140;
 
-        ProtocolGrid.ColumnHeaderStyle = (Style)FindResource(compact ? "CompactHeaderStyle" : "HeaderStyle");
-        if (compact)
+        ProtocolGrid.ColumnHeaderStyle = AlgorithmGrid.ColumnHeaderStyle = (Style)FindResource(compact ? "CompactHeaderStyle" : "HeaderStyle");
+
+        AlgorithmNameColumn.CellTemplate = ResourceTemplate(compact ? "CompactAlgorithmNameTemplate" : "AlgorithmNameTemplate");
+        AlgorithmSettingColumn.CellTemplate = ResourceTemplate(compact ? "CompactAlgorithmSettingTemplate" : "AlgorithmSettingTemplate");
+        AlgorithmResetColumn.CellTemplate = ResourceTemplate(compact ? "CompactAlgorithmResetTemplate" : "AlgorithmResetTemplate");
+        AlgorithmNameColumn.Width = new DataGridLength(compact ? 1.4 : 3, DataGridLengthUnitType.Star);
+        AlgorithmNameColumn.MinWidth = compact ? 258 : 240;
+        AlgorithmResetColumn.MinWidth = compact ? 56 : 140;
+
+        foreach (var grid in new[] { ProtocolGrid, AlgorithmGrid })
         {
-            ProtocolGrid.FontSize = 12;
-        }
-        else
-        {
-            ProtocolGrid.ClearValue(FontSizeProperty);
+            if (compact)
+            {
+                grid.FontSize = 12;
+            }
+            else
+            {
+                grid.ClearValue(FontSizeProperty);
+            }
         }
     }
 
@@ -188,7 +202,7 @@ public partial class MainWindow : Window
 
     private void UpdateSortArrows()
     {
-        foreach (var column in ProtocolGrid.Columns)
+        foreach (var column in ProtocolGrid.Columns.Concat(AlgorithmGrid.Columns))
         {
             column.SortDirection = null;
         }
@@ -196,6 +210,18 @@ public partial class MainWindow : Window
         if (_vm is null)
         {
             return;
+        }
+
+        DataGridColumn? algorithmSorted = _vm.AlgorithmSortKey switch
+        {
+            AlgorithmSortKey.Name => AlgorithmNameColumn,
+            AlgorithmSortKey.State or AlgorithmSortKey.Source => AlgorithmSettingColumn,
+            _ => null,
+        };
+
+        if (algorithmSorted is not null)
+        {
+            algorithmSorted.SortDirection = _vm.AlgorithmSortDescending ? ListSortDirection.Descending : ListSortDirection.Ascending;
         }
 
         DataGridColumn? sorted = _vm.SortKey switch
@@ -226,6 +252,21 @@ public partial class MainWindow : Window
         if (key is { } k)
         {
             _vm?.SortByColumn(k);
+        }
+    }
+
+    private void OnAlgorithmGridSorting(object sender, DataGridSortingEventArgs e)
+    {
+        e.Handled = true;
+
+        AlgorithmSortKey? key =
+            e.Column == AlgorithmNameColumn ? AlgorithmSortKey.Name :
+            e.Column == AlgorithmSettingColumn ? AlgorithmSortKey.State :
+            null;
+
+        if (key is { } k)
+        {
+            _vm?.SortAlgorithmsByColumn(k);
         }
     }
 

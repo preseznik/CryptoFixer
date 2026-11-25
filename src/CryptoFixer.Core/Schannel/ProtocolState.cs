@@ -39,6 +39,12 @@ public static class SchannelPaths
     public static string ProtocolKey(SchannelProtocol protocol) => $"{Protocols}\\{protocol.KeyName}";
 
     public static string RoleKey(SchannelProtocol protocol, ProtocolRole role) => $"{ProtocolKey(protocol)}\\{role}";
+
+    /// <summary>SCHANNEL\Ciphers, SCHANNEL\Hashes or SCHANNEL\KeyExchangeAlgorithms.</summary>
+    public static string AlgorithmFolder(AlgorithmCategory category) => $"{Schannel}\\{AlgorithmCatalog.FolderName(category)}";
+
+    /// <summary>The algorithm key. Its last segment may contain '/', e.g. "RC4 128/128", which is part of the key name.</summary>
+    public static string AlgorithmKey(SchannelAlgorithm algorithm) => $"{AlgorithmFolder(algorithm.Category)}\\{algorithm.KeyName}";
 }
 
 /// <summary>Raw Enabled / DisabledByDefault values of a protocol role key (null = value not present).</summary>

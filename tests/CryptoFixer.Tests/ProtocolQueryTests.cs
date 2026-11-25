@@ -83,6 +83,55 @@ public class ProtocolQueryTests
             descending);
     }
 
+    private static IReadOnlyList<AlgorithmRowView> AlgorithmRows(InMemoryRegistry registry, int build, AlgorithmCategory category, params SchannelAlgorithm[] pending) =>
+        new SchannelProtocolStore(registry).ReadAllAlgorithms(build)
+            .Where(s => s.Algorithm.Category == category)
+            .Select(s => new AlgorithmRowView(s, pending.Contains(s.Algorithm)))
+            .ToList();
+
+    private static List<string> Names(IEnumerable<AlgorithmRowView> rows, ProtocolFilter filter) =>
+        rows.Where(filter.Matches).Select(r => r.Algorithm.KeyName).ToList();
+
+    [Fact]
+    public void Algorithm_filters_use_effective_state_source_pending_and_deprecation()
+    {
+        var registry = new InMemoryRegistry();
+        registry.SetDWord(SchannelPaths.AlgorithmKey(AlgorithmCatalog.Aes128), "Enabled", 0);
+        var rows = AlgorithmRows(registry, Server2022, AlgorithmCategory.Cipher, AlgorithmCatalog.Rc4_128);
+
+        Assert.Equal(["RC4 40/128", "RC4 56/128", "RC4 64/128", "RC4 128/128"], Names(rows, new ProtocolFilter("rc4")));
+        Assert.Equal(["RC4 128/128"], Names(rows, new ProtocolFilter("rc4128/128")));
+        Assert.Empty(Names(rows, new ProtocolFilter("aes deprecated")));
+        Assert.Equal(11, Names(rows, new ProtocolFilter(State: ProtocolStateFilter.Deprecated)).Count);
+        Assert.Equal(["Triple DES 168", "Triple DES 168/168", "AES 256/256"], Names(rows, new ProtocolFilter(State: ProtocolStateFilter.Enabled)));
+        Assert.Equal(["AES 128/128"], Names(rows, new ProtocolFilter(State: ProtocolStateFilter.SetInRegistry, Roles: RoleScope.Client)));
+        Assert.Equal(12, Names(rows, new ProtocolFilter(State: ProtocolStateFilter.OsDefault)).Count);
+        Assert.Equal(["RC4 128/128"], Names(rows, new ProtocolFilter(State: ProtocolStateFilter.PendingChanges)));
+        Assert.Empty(Names(rows, new ProtocolFilter(State: ProtocolStateFilter.NotSupported)));
+
+        var win11 = AlgorithmRows(new InMemoryRegistry(), 22621, AlgorithmCategory.Cipher);
+        Assert.Equal(["AES 128/128", "AES 256/256"], Names(win11, new ProtocolFilter(State: ProtocolStateFilter.Enabled)));
+    }
+
+    [Fact]
+    public void Algorithm_sorting_by_strength_name_state_and_source()
+    {
+        var registry = new InMemoryRegistry();
+        registry.SetDWord(SchannelPaths.AlgorithmKey(AlgorithmCatalog.Sha256), "Enabled", 0);
+        registry.SetDWord(SchannelPaths.AlgorithmKey(AlgorithmCatalog.Md5), "Enabled", 0);
+        var rows = AlgorithmRows(registry, Server2022, AlgorithmCategory.Hash).Reverse().ToList();
+
+        static List<string> Sorted(IEnumerable<AlgorithmRowView> rows, AlgorithmSortKey key, bool descending = false) =>
+            rows.OrderBy(r => r, new AlgorithmRowComparer(key, descending)).Select(r => r.Algorithm.KeyName).ToList();
+
+        Assert.Equal(["MD5", "SHA", "SHA256", "SHA384", "SHA512"], Sorted(rows, AlgorithmSortKey.Strength));
+        Assert.Equal(["SHA512", "SHA384", "SHA256", "SHA", "MD5"], Sorted(rows, AlgorithmSortKey.Strength, descending: true));
+        Assert.Equal(["MD5", "SHA", "SHA256", "SHA384", "SHA512"], Sorted(rows, AlgorithmSortKey.Name));
+        Assert.Equal(["SHA", "SHA384", "SHA512", "MD5", "SHA256"], Sorted(rows, AlgorithmSortKey.State));
+        Assert.Equal(["MD5", "SHA256", "SHA", "SHA384", "SHA512"], Sorted(rows, AlgorithmSortKey.Source));
+        Assert.Equal(["SHA", "SHA384", "SHA512", "MD5", "SHA256"], Sorted(rows, AlgorithmSortKey.Source, descending: true));
+    }
+
     [Fact]
     public void Sorting_by_name_source_and_version()
     {

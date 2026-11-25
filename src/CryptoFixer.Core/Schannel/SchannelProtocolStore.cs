@@ -2,7 +2,10 @@ using CryptoFixer.Core.Registry;
 
 namespace CryptoFixer.Core.Schannel;
 
-/// <summary>Reads and writes Schannel protocol settings through an <see cref="IRegistryAccess"/>.</summary>
+/// <summary>
+/// Reads and writes Schannel settings (protocols, ciphers, hashes and key exchange algorithms) through an
+/// <see cref="IRegistryAccess"/>, and reads the active cipher suite list.
+/// </summary>
 public sealed class SchannelProtocolStore
 {
     private readonly IRegistryAccess _registry;
@@ -62,4 +65,80 @@ public sealed class SchannelProtocolStore
             }
         }
     }
+
+    public AlgorithmState Read(SchannelAlgorithm algorithm, int osBuild) => Read(algorithm, osBuild, keyExists: true);
+
+    /// <summary>Reads every cipher, hash and key exchange algorithm. Each SCHANNEL folder is listed once so that
+    /// keys that don't exist cost no further registry calls (this matters for remote computers).</summary>
+    public IReadOnlyList<AlgorithmState> ReadAllAlgorithms(int osBuild)
+    {
+        var existing = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var category in Enum.GetValues<AlgorithmCategory>())
+        {
+            var folder = SchannelPaths.AlgorithmFolder(category);
+            existing.UnionWith(_registry.GetSubKeyNames(folder).Select(name => $"{folder}\\{name}"));
+        }
+
+        return AlgorithmCatalog.All
+            .Select(a => Read(a, osBuild, existing.Contains(SchannelPaths.AlgorithmKey(a))))
+            .ToList();
+    }
+
+    /// <summary>Reads protocols, algorithms and the active cipher suite list in one go.</summary>
+    public SchannelSnapshot ReadSnapshot(int osBuild) =>
+        new(ReadAll(osBuild), ReadAllAlgorithms(osBuild), ActiveCipherSuites.Read(_registry));
+
+    /// <summary>Writes algorithm changes: Enabled writes 0xffffffff, Disabled writes 0 and NotConfigured deletes the
+    /// Enabled value. Other values in the key (e.g. key sizes) are left alone.</summary>
+    public void Apply(IEnumerable<AlgorithmChange> changes)
+    {
+        ArgumentNullException.ThrowIfNull(changes);
+        var list = changes.ToList();
+
+        foreach (var change in list)
+        {
+            if (change.Target == ConfiguredSetting.Custom)
+            {
+                throw new ArgumentException($"Cannot apply a custom setting ({change.Algorithm}).", nameof(changes));
+            }
+        }
+
+        foreach (var change in list)
+        {
+            var key = SchannelPaths.AlgorithmKey(change.Algorithm);
+            switch (change.Target)
+            {
+                case ConfiguredSetting.NotConfigured:
+                    _registry.DeleteValue(key, SchannelPaths.EnabledValue);
+                    break;
+                case ConfiguredSetting.Enabled:
+                    _registry.SetDWord(key, SchannelPaths.EnabledValue, AlgorithmState.EnabledValue);
+                    break;
+                default:
+                    _registry.SetDWord(key, SchannelPaths.EnabledValue, 0);
+                    break;
+            }
+        }
+    }
+
+    private AlgorithmState Read(SchannelAlgorithm algorithm, int osBuild, bool keyExists)
+    {
+        var key = SchannelPaths.AlgorithmKey(algorithm);
+        uint? Value(string name) => keyExists ? _registry.GetValue(key, name)?.AsUInt32() : null;
+
+        var sizes = AlgorithmDefaults.KeySizeValues(algorithm, osBuild)
+            .Select(v => new KeySizeSetting(v.ValueName, Value(v.ValueName), v.DefaultText))
+            .ToList();
+
+        return new AlgorithmState(algorithm, Value(SchannelPaths.EnabledValue), AlgorithmDefaults.Get(algorithm, osBuild))
+        {
+            KeySizes = sizes,
+        };
+    }
 }
+
+/// <summary>Everything the main view shows for one computer.</summary>
+public sealed record SchannelSnapshot(
+    IReadOnlyList<ProtocolRoleState> Protocols,
+    IReadOnlyList<AlgorithmState> Algorithms,
+    ActiveCipherSuites CipherSuites);

@@ -53,8 +53,8 @@ public sealed class SchannelTarget : IDisposable
     public bool IsLocal => Session is null;
 
     public string RegistryPath => IsLocal
-        ? $@"HKEY_LOCAL_MACHINE\{SchannelPaths.Protocols}"
-        : $@"\\{HostName}\HKEY_LOCAL_MACHINE\{SchannelPaths.Protocols}";
+        ? $@"HKEY_LOCAL_MACHINE\{SchannelPaths.Schannel}"
+        : $@"\\{HostName}\HKEY_LOCAL_MACHINE\{SchannelPaths.Schannel}";
 
     /// <summary>Host name usable in a file name (IPv6 colons and other reserved characters become '-').</summary>
     public string FileNameHost => SafeFileName(HostName);

@@ -1,16 +1,23 @@
 # CryptoFixer
 
-CryptoFixer is a Windows desktop app (WPF) that shows which **Schannel security protocols** are enabled on a Windows Server or Windows machine and lets you enable or disable them per role (**Server** and **Client**).
+CryptoFixer is a Windows desktop app (WPF) that shows which **Schannel security protocols, ciphers, hashes and key exchange algorithms** are enabled on a Windows Server or Windows machine and lets you enable or disable them.
 
 It manages the standard Schannel registry settings:
 
 ```
-HKLM\SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL\Protocols\<Protocol>\{Server|Client}
-    Enabled            (DWORD)
-    DisabledByDefault  (DWORD)
+HKLM\SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL\
+    Protocols\<Protocol>\{Server|Client}
+        Enabled            (DWORD)
+        DisabledByDefault  (DWORD)
+    Ciphers\<Cipher>                 Enabled (DWORD)
+    Hashes\<Hash>                    Enabled (DWORD)
+    KeyExchangeAlgorithms\<Name>     Enabled (DWORD)
 ```
 
-Protocols covered: PCT 1.0, Multi-Protocol Unified Hello, SSL 2.0, SSL 3.0, TLS 1.0, TLS 1.1, TLS 1.2, TLS 1.3, DTLS 1.0, DTLS 1.2.
+- **Protocols** (per Server and Client role): PCT 1.0, Multi-Protocol Unified Hello, SSL 2.0, SSL 3.0, TLS 1.0, TLS 1.1, TLS 1.2, TLS 1.3, DTLS 1.0, DTLS 1.2.
+- **Ciphers**: NULL, DES 56/56, RC2 40/128, 56/128 and 128/128, RC4 40/128, 56/128, 64/128 and 128/128, Triple DES 168 (and the legacy key name Triple DES 168/168), AES 128/128, AES 256/256.
+- **Hashes**: MD5, SHA (SHA-1), SHA256, SHA384, SHA512.
+- **Key exchange**: PKCS (RSA), Diffie-Hellman, ECDH. The Diffie-Hellman and PKCS key-size values are shown read-only.
 
 It works on the local computer and on **remote machines** (over WinRM or DCOM; see [Remote machines](#remote-machines)).
 
@@ -23,17 +30,21 @@ It works on the local computer and on **remote machines** (over WinRM or DCOM; s
 | ![Compact view](docs/screenshot-compact.png) | ![Standard view](docs/screenshot-standard.png) |
 | **List view** | **Remote machine (read-only connection)** |
 | ![List view](docs/screenshot-list.png) | ![Remote machine](docs/screenshot-remote.png) |
+| **Ciphers section** | **Ciphers section, List view** |
+| ![Ciphers section](docs/screenshot-ciphers.png) | ![Ciphers section in List view](docs/screenshot-ciphers-list.png) |
 
 ## Requirements
 
 - Windows Server 2016 or later, or Windows 10/11. Older builds also work, and their OS defaults are shown.
 - **Administrator rights** to make changes. The executable asks for elevation (UAC). Without elevation it opens **read-only**.
-- **A restart is required** before Schannel protocol changes take effect.
+- **A restart is required** before Schannel changes (protocols, ciphers, hashes and key exchange) take effect.
 - For remote machines: WinRM (or DCOM) access to the target and administrator rights there. See [Remote machines](#remote-machines).
 - No installer and no .NET runtime: the release is one self-contained `CryptoFixer.exe` (see [Installing on a server](#installing-on-a-server)).
 - To build: the .NET 10 SDK. Self-contained builds don't need a .NET runtime on the server.
 
 ## Using the app
+
+The **section switcher** above the table selects *Protocols*, *Ciphers*, *Hashes* or *Key exchange*. Staged changes are kept per section, and **Apply** writes the changes from all sections together.
 
 Each protocol has a **Server** and a **Client** cell. Each cell shows:
 
@@ -45,32 +56,50 @@ Each protocol has a **Server** and a **Client** cell. Each cell shows:
 - **Effective state**: what Schannel actually uses. It is one of *Enabled*, *Enabled (on request only)* (meaning `DisabledByDefault=1`, so only apps that explicitly ask for the protocol can use it), *Disabled*, or *Not supported* on this Windows build (any registry values are ignored).
 - **Source**: either *Set in registry* or *OS default (not configured)*. Hover over a cell to see the raw registry values.
 
+### Ciphers, hashes and key exchange
+
+These settings have no Server/Client split. Each algorithm has one **Enabled** setting that applies to all Schannel connections:
+
+- `OS default (…)`: no `Enabled` value. The bracket shows what this Windows build does by default (see [OS defaults](#os-defaults)).
+- `Enabled`: writes `Enabled=0xffffffff`.
+- `Disabled`: writes `Enabled=0`, which blocks the algorithm in every cipher suite that uses it.
+
+Any other non-zero value counts as enabled (Microsoft uses `1` for Diffie-Hellman). Reset removes only the `Enabled` value; Diffie-Hellman and PKCS key sizes (`ServerMinKeyBitLength`, `ClientMinKeyBitLength`, `ClientMaxKeyBitLength`) are shown in the tooltip and are never changed.
+
+Markers:
+
+- **Deprecated**: NULL, DES, RC2, RC4 and Triple DES (like SSL and TLS 1.0/1.1 among the protocols). The *Deprecated* filter shows them.
+- **`*` / inferred**: Microsoft doesn't state this default; it is inferred from the cipher suite tables.
+- **undocumented**: Microsoft doesn't document this key at all (AES, SHA256/384/512 and ECDH). Schannel does read it, but test before relying on it.
+- **Cipher suites** column: how many suites in the active cipher suite list use the algorithm, for example `6 suites`, `none listed`, or `4 listed · blocked` when the algorithm is disabled but suites that need it are still listed (those suites are then unusable). Hover for the suite names. See [Ciphers and cipher suites](#ciphers-and-cipher-suites).
+
 ### Workflow
 
 1. Change the drop-downs. Changes are **staged** (highlighted) and nothing is written yet.
 2. Click **Apply changes…**. A confirmation lists every change and shows warnings, for example:
    - no TLS 1.2/1.3 would be left for a role, which breaks RDP, WinRM and HTTPS
-   - you are enabling a deprecated or unsupported protocol
+   - you are enabling a deprecated or unsupported protocol, or a deprecated cipher
    - you are disabling TLS 1.0/1.1 that is still in use
-3. Before writing, the app **automatically saves a `.reg` backup** of the whole `Protocols` tree to `Documents\CryptoFixer\Backups\Schannel-Protocols-<machine>-<timestamp>.reg`. If the backup fails, nothing is applied.
+   - both AES ciphers, SHA-1, PKCS, ECDH or every key exchange algorithm would be disabled
+3. Before writing, the app **automatically saves a `.reg` backup** of the `Protocols`, `Ciphers`, `Hashes` and `KeyExchangeAlgorithms` trees to `Documents\CryptoFixer\Backups\Schannel-<machine>-<timestamp>.reg`. If the backup fails, nothing is applied.
 4. **Restart Windows** for the changes to take effect. The app offers to restart (with a 10-second delay) or you can restart later.
 
 Other actions:
 
-- **Reset to OS default** (per row): removes `Enabled` and `DisabledByDefault` for both roles.
+- **Reset to OS default** (per row): removes `Enabled` and `DisabledByDefault` for both roles of a protocol, or `Enabled` for an algorithm. To reset everything, use the *OS defaults* preset.
 - **Presets ▾**: stages a built-in or saved configuration (see [Presets](#presets)).
 - **Export backup…**: saves a `.reg` backup on demand.
 - **Discard**: drops all staged changes.
 
 ### Search, filter and sort
 
-The toolbar above the table narrows and orders the protocol list. Filters only change what is shown: staged changes stay staged when their rows are hidden, and **Apply** always applies all of them.
+The toolbar above the table narrows and orders the list for the current section. Filters only change what is shown: staged changes stay staged when their rows are hidden, and **Apply** always applies all of them.
 
-- **Search** (Ctrl+F): matches protocol names and descriptions. It ignores case and spaces, so `tls1.2` finds TLS 1.2. With several words, all of them must match. Esc clears the search.
-- **Show**: *All protocols*, *Enabled*, *Disabled*, *Not supported*, *Set in registry*, *Using OS default*, *Pending changes* or *Deprecated protocols*. A protocol is shown when the selected side(s) match.
-- **Side**: *Server and client*, *Server only* or *Client only*. This hides the other column, and the **Show** filter then only looks at that side.
-- **Sort**: *Protocol version* (oldest first, the default), *Name*, *Server state*, *Client state*, *Server: set in registry first* or *Client: set in registry first*. The ↑/↓ button reverses the order.
-- **Column headers** (Standard and Compact views): click once to sort ascending, again for descending, and a third time to go back to protocol version order.
+- **Search** (Ctrl+F): matches names and descriptions. It ignores case and spaces, so `tls1.2` finds TLS 1.2 and `rc4128` finds RC4 128/128. With several words, all of them must match. Esc clears the search.
+- **Show**: *All*, *Enabled*, *Disabled*, *Not supported*, *Set in registry*, *Using OS default*, *Pending changes* or *Deprecated*. A protocol is shown when the selected side(s) match.
+- **Side** (Protocols only): *Server and client*, *Server only* or *Client only*. This hides the other column, and the **Show** filter then only looks at that side.
+- **Sort**: for protocols *Protocol version* (oldest first, the default), *Name*, *Server state*, *Client state*, *Server: set in registry first* or *Client: set in registry first*. For ciphers, hashes and key exchange *Strength (weakest first)*, *Name*, *State* or *Set in registry first*. The ↑/↓ button reverses the order.
+- **Column headers** (Standard and Compact views): click once to sort ascending, again for descending, and a third time to go back to the default order.
 - **Clear filters** (next to the result count) resets search, Show and Side.
 
 ### Display modes
@@ -85,7 +114,7 @@ The selected mode is remembered in `CryptoFixer.settings.json` next to the execu
 
 ### Presets
 
-A preset is a named set of protocol settings. Choosing a preset from **Presets ▾** only **stages** its settings. Review them and click **Apply changes…** as usual.
+A preset is a named set of protocol, cipher, hash and key exchange settings. Choosing a preset from **Presets ▾** only **stages** its settings. Review them and click **Apply changes…** as usual.
 
 Built-in presets:
 
@@ -93,9 +122,11 @@ Built-in presets:
   - disables PCT, Unified Hello, SSL 2.0/3.0 and TLS 1.0/1.1
   - disables DTLS 1.0 where DTLS 1.2 is available
   - enables TLS 1.2, TLS 1.3 and DTLS 1.2 where this Windows build supports them, and removes their settings where it doesn't
+  - disables the NULL, DES, RC2, RC4 and Triple DES ciphers and enables AES 128 and AES 256
+  - leaves hashes and key exchange unchanged
 
-  Check TLS 1.0/1.1 compatibility before applying it.
-- **OS defaults: remove all settings**: removes every `Enabled`/`DisabledByDefault` value so Windows uses its built-in defaults.
+  Check TLS 1.0/1.1 and 3DES compatibility (for example very old clients or appliances) before applying it.
+- **OS defaults: remove all settings**: removes every protocol `Enabled`/`DisabledByDefault` value and every cipher, hash and key exchange `Enabled` value so Windows uses its built-in defaults. Key-size values are kept.
 
 Your own presets:
 
@@ -107,7 +138,7 @@ Presets are stored in `CryptoFixer.presets.json` next to the executable, so they
 
 ```jsonc
 {
-  "formatVersion": 1,
+  "formatVersion": 2,
   "help": "…",
   "presets": [
     {
@@ -121,16 +152,25 @@ Presets are stored in `CryptoFixer.presets.json` next to the executable, so they
         "TLS 1.1": "disabled",
         "TLS 1.2": "enabled",
         "TLS 1.3": { "server": "osDefault" }                  // only the Server side
-      }
+      },
+      "ciphers": {                                            // optional (format version 2)
+        "Triple DES 168": "disabled",
+        "RC4 128/128": "disabled",
+        "AES 256/256": "enabled"
+      },
+      "hashes": { "MD5": "disabled" },                        // optional
+      "keyExchange": { "Diffie-Hellman": "osDefault" }        // optional
     }
   ]
 }
 ```
 
 - Protocol names are the registry key names shown in the app (`PCT 1.0`, `Multi-Protocol Unified Hello`, `SSL 2.0` … `DTLS 1.2`). Case doesn't matter.
+- Cipher, hash and key exchange names are the registry key names too, including the `/` (for example `RC4 128/128`, `Triple DES 168/168`, `SHA`, `PKCS`, `ECDH`). Case doesn't matter.
 - Values are `enabled`, `disabled` or `osDefault` (removes the registry values). `on`/`off`, `enable`/`disable` and `default`/`notConfigured` are accepted too.
-- Protocols or sides that a preset leaves out are not changed when you load it.
+- Protocols, sides or algorithms that a preset leaves out are not changed when you load it.
 - `Enabled` is not staged for a protocol that this Windows build doesn't support. The status line reports what was skipped.
+- Files written by version 1.1 and earlier (`"formatVersion": 1`, protocols only) load unchanged. CryptoFixer writes version 2 only when a preset contains cipher, hash or key exchange settings, so protocol-only files stay at version 1. Version 1.1 loads a version 2 file with a warning and ignores the new sections, but drops them if it saves the file, so don't share a presets file between old and new versions.
 - Reading is lenient. Comments and trailing commas are allowed, and invalid entries are skipped with a warning in the status line. Comments are lost when the app saves the file.
 - If the file can't be parsed, the app shows the error and keeps it unchanged. When you next save a preset, it offers to rename the broken file to `CryptoFixer.presets.json.invalid-<date>` and start a new one.
 
@@ -148,15 +188,15 @@ A missing file means "no presets", "default settings" or "no remote machines". A
 
 ### Restoring a backup
 
-A backup restores the `Protocols` tree to its earlier state. It also removes any `Enabled`/`DisabledByDefault` values the app added afterwards.
+A backup restores the `Protocols`, `Ciphers`, `Hashes` and `KeyExchangeAlgorithms` trees to their earlier state. It also removes any `Enabled`/`DisabledByDefault` values the app added afterwards.
 
 ```powershell
-reg import "$env:USERPROFILE\Documents\CryptoFixer\Backups\Schannel-Protocols-<machine>-<timestamp>.reg"
+reg import "$env:USERPROFILE\Documents\CryptoFixer\Backups\Schannel-<machine>-<timestamp>.reg"
 ```
 
 Then restart Windows.
 
-A backup of a remote machine is saved **on this PC** and named after it (`Schannel-Protocols-<host>-<timestamp>.reg`). The file uses plain `HKEY_LOCAL_MACHINE` paths, so copy it to that machine and run the same `reg import` there, then restart it.
+A backup of a remote machine is saved **on this PC** and named after it (`Schannel-<host>-<timestamp>.reg`). The file uses plain `HKEY_LOCAL_MACHINE` paths, so copy it to that machine and run the same `reg import` there, then restart it. Backups made by version 1.1 and earlier are named `Schannel-Protocols-…` and cover only the protocols.
 
 ### Read-only mode
 
@@ -229,7 +269,8 @@ Credentials are either **your current Windows account** (Kerberos single sign-on
 
 ### Applying changes remotely
 
-- Before writing, CryptoFixer saves a `.reg` backup of the target's `Protocols` tree **on this PC**, named after the target (see [Restoring a backup](#restoring-a-backup)). If the backup fails, nothing is applied.
+- Before writing, CryptoFixer saves a `.reg` backup of the target's Schannel trees **on this PC**, named after the target (see [Restoring a backup](#restoring-a-backup)). If the backup fails, nothing is applied.
+- Ciphers, hashes and key exchange work on remote machines exactly as they do locally. Key names that contain `/` (such as `RC4 128/128`) are created as a single key through StdRegProv `CreateKey`.
 - After applying, it offers to **restart the remote machine** (Win32_OperatingSystem `Win32ShutdownTracker`: a planned, forced restart after about 10 seconds with a comment in the event log). You can also restart later with the *Restart &lt;name&gt;…* button in the restart notice.
 - Whether you can apply changes to a remote machine depends on the account used for the connection, not on whether CryptoFixer runs elevated. `--read-only` makes every connection read-only.
 
@@ -278,11 +319,48 @@ Sources:
 
 The Unified Hello defaults are inferred from the documentation and not stated in it explicitly. TLS 1.0/1.1 are still enabled by default on in-market Windows releases.
 
+### Ciphers, hashes and key exchange defaults
+
+With no `Enabled` value, Windows doesn't block any of these algorithms. The OS default CryptoFixer shows is whether a cipher suite that uses the algorithm is **enabled by default** on that build: *Disabled* means no default suite uses it, so it is effectively off. `*` marks defaults that are inferred rather than stated by Microsoft.
+
+| Algorithm | OS default |
+|---|---|
+| NULL | Disabled (NULL suites are used only when an application explicitly asks for them) |
+| DES 56/56, RC4 40/128, RC4 56/128 | Disabled |
+| RC2 40/128, 56/128, 128/128 | Disabled * (Windows 7 and later have no RC2 suites) |
+| RC4 64/128 | Disabled * (no suite uses it) |
+| RC4 128/128 | Enabled before Windows 10 1709 (build 16299); Disabled from 1709, Server 2019 and later |
+| Triple DES 168 | Enabled up to Server 2022 (20348) and Windows 10 21H2; Disabled on Windows 10 22H2 (19045), Windows 11 22H2 and later (22621+), Server 2022 23H2 and Server 2025 |
+| Triple DES 168/168 | Same as Triple DES 168 * (pre-Vista key name) |
+| AES 128/128, AES 256/256 | Enabled * (key undocumented) |
+| MD5 | Enabled (not blocked, although no `*_MD5` suite is enabled by default since Windows 10 1709) |
+| SHA, PKCS, Diffie-Hellman | Enabled |
+| SHA256, SHA384, SHA512, ECDH | Enabled * (key undocumented) |
+| Diffie-Hellman `ServerMinKeyBitLength` | 2048 bits from Windows 10 / Server 2016, 1024 before (read-only) |
+
+Sources:
+
+- [Restrict the use of certain cryptographic algorithms and protocols in Schannel.dll (KB 245030)](https://learn.microsoft.com/troubleshoot/windows-server/windows-security/restrict-cryptographic-algorithms-protocols-schannel)
+- [Cipher Suites in TLS/SSL (Schannel SSP)](https://learn.microsoft.com/windows/win32/secauthn/cipher-suites-in-schannel) and the per-version suite tables linked there
+
+## Ciphers and cipher suites
+
+TLS doesn't negotiate ciphers on their own but **cipher suites**, such as `TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384` (key exchange ECDHE, cipher AES 256, hash SHA384) or `TLS_RSA_WITH_3DES_EDE_CBC_SHA` (key exchange RSA/PKCS, cipher Triple DES, hash SHA-1). Windows has two independent controls:
+
+1. **The cipher suite list and order** decides which suites Schannel offers and in which order. Without policy it is the `Functions` value (REG_MULTI_SZ) under `HKLM\SYSTEM\CurrentControlSet\Control\Cryptography\Configuration\Local\SSL\00010002`, managed with `Get-TlsCipherSuite`, `Enable-TlsCipherSuite` and `Disable-TlsCipherSuite`. The Group Policy setting *Computer Configuration → Administrative Templates → Network → SSL Configuration Settings → SSL Cipher Suite Order* writes a comma-separated list to `HKLM\SOFTWARE\Policies\Microsoft\Cryptography\Configuration\SSL\00010002\Functions`, which replaces the local list.
+2. **The `SCHANNEL\Ciphers`, `Hashes` and `KeyExchangeAlgorithms` keys** that CryptoFixer manages block an algorithm wherever it occurs.
+
+A suite is used only if it is **in the list and none of its algorithms is blocked**. For 3DES, either `Disable-TlsCipherSuite TLS_RSA_WITH_3DES_EDE_CBC_SHA` or setting *Triple DES 168* to *Disabled* here stops it being used. The suite list is the finer and Microsoft-recommended control; the algorithm keys are a blunt "never use this" switch that also covers suites added to the list later.
+
+CryptoFixer reads the active list (the policy list if it is set, otherwise the local list) **read-only** and shows in the *Cipher suites* column how many listed suites use each algorithm. `listed · blocked` means the algorithm is disabled while suites that need it are still listed; those suites are simply unusable, which is harmless, but you may want to remove them from the list too. CryptoFixer doesn't edit the suite list or order.
+
+TLS 1.3 suites (`TLS_AES_128_GCM_SHA256`, `TLS_AES_256_GCM_SHA384`, `TLS_CHACHA20_POLY1305_SHA256`) don't name a key exchange, and Microsoft doesn't document whether the algorithm keys affect TLS 1.3. The tooltip marks these suites.
+
 ## Scope and limitations
 
-- Covers Schannel **protocols** only. It does not change cipher, hash or key-exchange settings (`SCHANNEL\Ciphers`, `Hashes`, `KeyExchangeAlgorithms`), cipher suite order, or .NET Framework `SchUseStrongCrypto`/`SystemDefaultTlsVersions`. Those could be added later. Microsoft recommends managing cipher suites through cipher suite order (Group Policy or `Enable-TlsCipherSuite`/`Disable-TlsCipherSuite`).
+- Doesn't edit the cipher suite list or order (it is shown read-only; see [Ciphers and cipher suites](#ciphers-and-cipher-suites)), the elliptic curve order, the Diffie-Hellman/PKCS key sizes (shown read-only), or .NET Framework `SchUseStrongCrypto`/`SystemDefaultTlsVersions`. Microsoft recommends managing cipher suites through cipher suite order (Group Policy or `Enable-TlsCipherSuite`/`Disable-TlsCipherSuite`).
 - Settings deployed by Group Policy or configuration management may overwrite changes made here.
-- Changing protocol settings can break connectivity, including RDP, which uses TLS. Keep console or out-of-band access when hardening remote servers.
+- Changing protocol or cipher settings can break connectivity, including RDP, which uses TLS. Keep console or out-of-band access when hardening remote servers.
 - Remote machines are handled one at a time; there is no bulk apply across several machines. WinRM itself doesn't depend on Schannel over HTTP (5985), so disabling TLS versions doesn't lock CryptoFixer out of a machine. Over HTTPS (5986) it does use TLS.
 - The machine list sort order (Name or IP address) isn't saved; it starts sorted by name.
 
@@ -302,7 +380,7 @@ The tests use an in-memory registry fake, a temporary `HKCU\Software\CryptoFixer
 ```powershell
 .\scripts\publish.ps1              # version from Directory.Build.props, win-x64
 .\scripts\publish.ps1 -SmokeTest   # also starts the packaged exe read-only and closes it again
-.\scripts\publish.ps1 -Version 1.1.0 -Runtime win-arm64 -SkipTests
+.\scripts\publish.ps1 -Version 1.2.0 -Runtime win-arm64 -SkipTests
 .\scripts\publish.ps1 -OutputDir C:\Temp\cf-build   # package somewhere other than dist\
 ```
 
@@ -334,8 +412,8 @@ dotnet publish src\CryptoFixer\CryptoFixer.csproj -c Release -r win-x64 --self-c
 3. Create the release with tag `v<version>` (not a draft or prerelease, or the updater ignores it) and attach the three files the updater and users need:
 
 ```powershell
-gh release create v1.1.0 --title "CryptoFixer 1.1.0" --notes "…" `
-  dist\CryptoFixer-win-x64.exe dist\CryptoFixer-1.1.0-win-x64.zip dist\CryptoFixer-1.1.0-win-x64.sha256
+gh release create v1.2.0 --title "CryptoFixer 1.2.0" --notes "…" `
+  dist\CryptoFixer-win-x64.exe dist\CryptoFixer-1.2.0-win-x64.zip dist\CryptoFixer-1.2.0-win-x64.sha256
 ```
 
 The updater looks for exactly `CryptoFixer-<runtime>.exe` and a `.sha256` asset that lists it, and refuses releases whose tag isn't a version number. The update dialog shows the release notes as plain text, so keep Markdown formatting in them light (plain lists read fine; `**bold**` shows its asterisks).
@@ -353,7 +431,8 @@ The app targets **.NET 10 (LTS)**. .NET 8 reached end of support on 10 November 
 ## Project layout
 
 ```
-src/CryptoFixer.Core    Registry abstraction, protocol catalog, OS defaults, state evaluation, apply logic, .reg export,
+src/CryptoFixer.Core    Registry abstraction, protocol and algorithm catalogs, OS defaults, state evaluation, apply logic,
+                        cipher suite list and mapping (Schannel/), .reg export (Backup/),
                         search/filter/sort (Schannel/ProtocolQuery), presets (Presets/), portable settings (Settings/),
                         GitHub release check, verified download and exe swap (Updates/),
                         remote machines: machine list, IP sorting, DPAPI, CIM/StdRegProv registry, error mapping (Remote/)

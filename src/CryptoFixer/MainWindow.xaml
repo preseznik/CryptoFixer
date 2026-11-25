@@ -7,7 +7,7 @@
     xmlns:controls="clr-namespace:CryptoFixer.Controls"
         mc:Ignorable="d"
         d:DataContext="{d:DesignInstance Type=vm:MainViewModel}"
-        Title="CryptoFixer — Schannel protocol manager"
+        Title="CryptoFixer — Schannel protocol and cipher manager"
         Width="1120" Height="760" MinWidth="900" MinHeight="540"
         WindowStartupLocation="CenterScreen"
         Background="{StaticResource CanvasBrush}"
@@ -197,6 +197,88 @@
                     ToolTip="Reset to OS default: stage removal of Enabled/DisabledByDefault for Server and Client so Windows uses its built-in default." />
         </DataTemplate>
 
+        <!-- Ciphers, hashes and key exchange: the same cell templates, bound to the row's single Enabled setting. -->
+        <DataTemplate x:Key="AlgorithmNameTemplate" DataType="{x:Type vm:AlgorithmRowViewModel}">
+            <StackPanel Margin="16,8,8,8" VerticalAlignment="Center">
+                <WrapPanel>
+                    <TextBlock Text="{Binding Name}" FontWeight="SemiBold" FontSize="14" Margin="0,0,8,0" />
+                    <Border Background="#FFEBE9" CornerRadius="8" Padding="7,1" Margin="0,0,6,0" VerticalAlignment="Center"
+                            Visibility="{Binding IsDeprecated, Converter={StaticResource BoolToVisibility}}">
+                        <TextBlock Text="deprecated" FontSize="11" Foreground="#A40E26" />
+                    </Border>
+                    <Border Background="#EAEEF2" CornerRadius="8" Padding="7,1" VerticalAlignment="Center"
+                            Visibility="{Binding IsUndocumented, Converter={StaticResource BoolToVisibility}}"
+                            ToolTip="Microsoft doesn't document this registry key. Common hardening tools set it, but its effect and OS default are inferred.">
+                        <TextBlock Text="undocumented key" FontSize="11" Foreground="{StaticResource MutedTextBrush}" />
+                    </Border>
+                </WrapPanel>
+                <TextBlock Text="{Binding Description}" TextWrapping="Wrap" FontSize="11.5"
+                           Foreground="{StaticResource MutedTextBrush}" Margin="0,2,0,0" />
+                <TextBlock Text="{Binding KeySizeText}" TextWrapping="Wrap" FontSize="11.5" Margin="0,3,0,0"
+                           Visibility="{Binding HasKeySizes, Converter={StaticResource BoolToVisibility}}"
+                           ToolTip="Read-only. Set ServerMinKeyBitLength, ClientMinKeyBitLength or ClientMaxKeyBitLength (DWORD) under the key to change it." />
+            </StackPanel>
+        </DataTemplate>
+
+        <DataTemplate x:Key="CompactAlgorithmNameTemplate" DataType="{x:Type vm:AlgorithmRowViewModel}">
+            <StackPanel Orientation="Horizontal" Margin="12,4,8,4" VerticalAlignment="Center" Background="Transparent">
+                <StackPanel.ToolTip>
+                    <TextBlock>
+                        <Run Text="{Binding Description, Mode=OneWay}" />
+                        <LineBreak />
+                        <Run Text="{Binding KeySizeText, Mode=OneWay}" />
+                    </TextBlock>
+                </StackPanel.ToolTip>
+                <TextBlock Text="{Binding Name}" FontWeight="SemiBold" Margin="0,0,7,0" VerticalAlignment="Center" />
+                <Border Background="#FFEBE9" CornerRadius="7" Padding="5,0" Margin="0,0,5,0" VerticalAlignment="Center"
+                        Visibility="{Binding IsDeprecated, Converter={StaticResource BoolToVisibility}}">
+                    <TextBlock Text="deprecated" FontSize="10.5" Foreground="#A40E26" />
+                </Border>
+                <Border Background="#EAEEF2" CornerRadius="7" Padding="5,0" VerticalAlignment="Center"
+                        Visibility="{Binding IsUndocumented, Converter={StaticResource BoolToVisibility}}">
+                    <TextBlock Text="undocumented" FontSize="10.5" Foreground="{StaticResource MutedTextBrush}" />
+                </Border>
+            </StackPanel>
+        </DataTemplate>
+
+        <DataTemplate x:Key="AlgorithmSettingTemplate">
+            <ContentPresenter Content="{Binding Cell}" ContentTemplate="{StaticResource CellTemplate}" />
+        </DataTemplate>
+        <DataTemplate x:Key="CompactAlgorithmSettingTemplate">
+            <ContentPresenter Content="{Binding Cell}" ContentTemplate="{StaticResource CompactCellTemplate}" />
+        </DataTemplate>
+
+        <!-- Read-only indicator: how many suites in the active cipher suite list use the algorithm. -->
+        <DataTemplate x:Key="AlgorithmSuitesTemplate" DataType="{x:Type vm:AlgorithmRowViewModel}">
+            <TextBlock x:Name="Suites" Text="{Binding SuitesText}" ToolTip="{Binding SuitesToolTip}" Margin="12,0,8,0" VerticalAlignment="Center"
+                       Foreground="{StaticResource MutedTextBrush}" Background="Transparent" />
+            <DataTemplate.Triggers>
+                <DataTrigger Binding="{Binding WeakSuitesListed}" Value="True">
+                    <Setter TargetName="Suites" Property="Foreground" Value="#CF222E" />
+                    <Setter TargetName="Suites" Property="FontWeight" Value="SemiBold" />
+                </DataTrigger>
+                <MultiDataTrigger>
+                    <MultiDataTrigger.Conditions>
+                        <Condition Binding="{Binding BlocksListedSuites}" Value="True" />
+                        <Condition Binding="{Binding IsDeprecated}" Value="False" />
+                    </MultiDataTrigger.Conditions>
+                    <Setter TargetName="Suites" Property="Foreground" Value="#9A6700" />
+                    <Setter TargetName="Suites" Property="FontWeight" Value="SemiBold" />
+                </MultiDataTrigger>
+            </DataTemplate.Triggers>
+        </DataTemplate>
+
+        <DataTemplate x:Key="AlgorithmResetTemplate" DataType="{x:Type vm:AlgorithmRowViewModel}">
+            <Button Style="{StaticResource LinkButtonStyle}" Content="Reset to OS default" Margin="8,0,16,0" VerticalAlignment="Center"
+                    Command="{Binding ResetToOsDefaultCommand}" AutomationProperties.Name="{Binding Name, StringFormat='Reset {0} to OS default'}"
+                    ToolTip="Stage removal of the Enabled value so Windows uses its built-in default." />
+        </DataTemplate>
+        <DataTemplate x:Key="CompactAlgorithmResetTemplate" DataType="{x:Type vm:AlgorithmRowViewModel}">
+            <Button Style="{StaticResource LinkButtonStyle}" Content="Reset" Margin="6,0,12,0" VerticalAlignment="Center"
+                    Command="{Binding ResetToOsDefaultCommand}" AutomationProperties.Name="{Binding Name, StringFormat='Reset {0} to OS default'}"
+                    ToolTip="Reset to OS default: stage removal of the Enabled value so Windows uses its built-in default." />
+        </DataTemplate>
+
         <!-- Segmented control for the display mode. -->
         <Style x:Key="SegmentedListBoxStyle" TargetType="ListBox">
             <Setter Property="Background" Value="{StaticResource SurfaceBrush}" />
@@ -313,7 +395,7 @@
                         AutomationProperties.Name="Machines" ToolTip="Show or hide the machine list to manage remote computers (Ctrl+M)." />
                 <StackPanel Grid.Column="1">
                     <WrapPanel>
-                        <TextBlock Text="Schannel protocols" FontSize="22" FontWeight="SemiBold" VerticalAlignment="Center" Margin="0,0,12,0" />
+                        <TextBlock Text="Schannel settings" FontSize="22" FontWeight="SemiBold" VerticalAlignment="Center" Margin="0,0,12,0" />
                         <Border CornerRadius="12" Padding="10,3" VerticalAlignment="Center" Margin="0,4,0,0" ToolTip="{Binding TargetDetail}">
                             <Border.Style>
                                 <Style TargetType="Border">
@@ -595,7 +677,7 @@
                 <StackPanel Orientation="Horizontal">
                     <Button Content="Refresh" Command="{Binding RefreshCommand}" Margin="0" />
                     <Button Content="Export backup…" Command="{Binding ExportBackupCommand}"
-                            ToolTip="Save the current SCHANNEL\Protocols settings to a .reg file." />
+                            ToolTip="Save the current SCHANNEL settings (protocols, ciphers, hashes and key exchange) to a .reg file." />
                     <Button x:Name="PresetsButton" Content="Presets ▾" Click="OnPresetsClick" AutomationProperties.Name="Presets"
                             ToolTip="Load a preset to stage its settings, or save the current settings as a preset. Presets are stored next to CryptoFixer.exe." />
                 </StackPanel>
@@ -610,20 +692,37 @@
                        ToolTip="{Binding StatusText}" VerticalAlignment="Center" Margin="0,0,16,0" />
         </DockPanel>
 
-        <!-- Search, filter and sort -->
+        <!-- Section switcher: Protocols, Ciphers, Hashes, Key exchange -->
         <DockPanel DockPanel.Dock="Top" Margin="24,14,24,0">
+            <ListBox x:Name="SectionSwitch" Style="{StaticResource SegmentedListBoxStyle}" AutomationProperties.Name="Section"
+                     VerticalAlignment="Top"
+                     ItemsSource="{Binding Sections}" SelectedValuePath="Value" SelectedValue="{Binding Section}">
+                <ListBox.ItemTemplate>
+                    <DataTemplate DataType="{x:Type vm:SectionOption}">
+                        <TextBlock Text="{Binding Label}" ToolTip="{Binding ToolTip}" FontWeight="SemiBold" Background="Transparent"
+                                   AutomationProperties.Name="{Binding Title}" />
+                    </DataTemplate>
+                </ListBox.ItemTemplate>
+            </ListBox>
+            <TextBlock Text="{Binding SectionHint}" TextWrapping="Wrap" FontSize="12" Foreground="{StaticResource MutedTextBrush}"
+                       VerticalAlignment="Center" Margin="16,0,0,0"
+                       Visibility="{Binding IsAlgorithmSection, Converter={StaticResource BoolToVisibility}}" />
+        </DockPanel>
+
+        <!-- Search, filter and sort -->
+        <DockPanel DockPanel.Dock="Top" Margin="24,10,24,0">
             <WrapPanel>
                 <Grid Width="240" Margin="0,0,18,6" VerticalAlignment="Center">
                     <TextBox x:Name="SearchBox" Text="{Binding SearchText, UpdateSourceTrigger=PropertyChanged}"
-                             Padding="24,5,6,5" VerticalContentAlignment="Center" AutomationProperties.Name="Search protocols"
-                             ToolTip="Search protocol names and descriptions (Ctrl+F). Esc clears the search.">
+                             Padding="24,5,6,5" VerticalContentAlignment="Center" AutomationProperties.Name="{Binding SearchPlaceholder}"
+                             ToolTip="Search names and descriptions (Ctrl+F). Esc clears the search.">
                         <TextBox.InputBindings>
                             <KeyBinding Key="Escape" Command="{Binding ClearSearchCommand}" />
                         </TextBox.InputBindings>
                     </TextBox>
                     <TextBlock Text="&#xE721;" FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" FontSize="12" Margin="8,0,0,0"
                                VerticalAlignment="Center" Foreground="{StaticResource MutedTextBrush}" IsHitTestVisible="False" />
-                    <TextBlock Text="Search protocols" Margin="27,0,0,0" VerticalAlignment="Center" IsHitTestVisible="False"
+                    <TextBlock Text="{Binding SearchPlaceholder}" Margin="27,0,0,0" VerticalAlignment="Center" IsHitTestVisible="False"
                                Foreground="#8C959F">
                         <TextBlock.Style>
                             <Style TargetType="TextBlock">
@@ -643,10 +742,11 @@
                     <ComboBox Width="170" Padding="6,4" AutomationProperties.Name="Show"
                               ItemsSource="{Binding StateFilterOptions}" DisplayMemberPath="Label" SelectedValuePath="Value"
                               SelectedValue="{Binding StateFilter}"
-                              ToolTip="Show only protocols whose server or client side (see Side) is in this state." />
+                              ToolTip="Show only entries in this state. For protocols, Side chooses whether the server or client side counts." />
                 </StackPanel>
 
-                <StackPanel Orientation="Horizontal" Margin="0,0,18,6">
+                <StackPanel Orientation="Horizontal" Margin="0,0,18,6"
+                            Visibility="{Binding IsProtocolSection, Converter={StaticResource BoolToVisibility}}">
                     <TextBlock Text="Side" VerticalAlignment="Center" Margin="0,0,7,0" Foreground="{StaticResource MutedTextBrush}" />
                     <ComboBox Width="150" Padding="6,4" AutomationProperties.Name="Side"
                               ItemsSource="{Binding RoleScopeOptions}" DisplayMemberPath="Label" SelectedValuePath="Value"
@@ -658,7 +758,13 @@
                     <ComboBox Width="200" Padding="6,4" AutomationProperties.Name="Sort by"
                               ItemsSource="{Binding SortOptions}" DisplayMemberPath="Label" SelectedValuePath="Value"
                               SelectedValue="{Binding SortKey}"
+                              Visibility="{Binding IsProtocolSection, Converter={StaticResource BoolToVisibility}}"
                               ToolTip="You can also click a column header: ascending, descending, then back to version order." />
+                    <ComboBox Width="200" Padding="6,4" AutomationProperties.Name="Sort by"
+                              ItemsSource="{Binding AlgorithmSortOptions}" DisplayMemberPath="Label" SelectedValuePath="Value"
+                              SelectedValue="{Binding AlgorithmSortKey}"
+                              Visibility="{Binding IsAlgorithmSection, Converter={StaticResource BoolToVisibility}}"
+                              ToolTip="You can also click a column header: ascending, descending, then back to strength order." />
                     <Button Content="{Binding SortDirectionGlyph}" ToolTip="{Binding SortDirectionToolTip}" Command="{Binding ToggleSortDirectionCommand}"
                             MinWidth="0" Padding="10,3" Margin="5,0,0,0" AutomationProperties.Name="Sort direction" />
                 </StackPanel>
@@ -672,7 +778,7 @@
                 <ListBox x:Name="DisplayModeSwitch" Style="{StaticResource SegmentedListBoxStyle}" AutomationProperties.Name="Display mode"
                          ItemsSource="{Binding DisplayModeOptions}" DisplayMemberPath="Label" SelectedValuePath="Value"
                          SelectedValue="{Binding DisplayMode}"
-                         ToolTip="Standard: full table. Compact: one line per protocol. List: one item per protocol with server and client inline. Remembered next to CryptoFixer.exe." />
+                         ToolTip="Standard: full table. Compact: one line per entry. List: one item per entry with its settings inline. Remembered next to CryptoFixer.exe." />
             </StackPanel>
             <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
                 <TextBlock Text="{Binding VisibleCountText}" Foreground="{StaticResource MutedTextBrush}" VerticalAlignment="Center" />
@@ -686,7 +792,7 @@
         <Border Margin="24,8,24,0" Background="{StaticResource SurfaceBrush}" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" CornerRadius="8">
             <Grid>
             <DataGrid x:Name="ProtocolGrid" ItemsSource="{Binding RowsView}" AutoGenerateColumns="False"
-                      Visibility="{Binding IsTableMode, Converter={StaticResource BoolToVisibility}}"
+                      Visibility="{Binding ShowProtocolTable, Converter={StaticResource BoolToVisibility}}"
                       CanUserAddRows="False" CanUserDeleteRows="False" CanUserReorderColumns="False" CanUserResizeRows="False"
                       CanUserSortColumns="True" Sorting="OnGridSorting" HeadersVisibility="Column" GridLinesVisibility="Horizontal"
                       HorizontalGridLinesBrush="#EAEEF2" BorderThickness="0" Background="Transparent" Margin="1"
@@ -708,7 +814,7 @@
 
             <!-- List display mode: same filtered and sorted RowsView, one item per protocol. -->
             <ScrollViewer x:Name="ListScroller" Margin="1" Focusable="False" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"
-                          Visibility="{Binding IsListMode, Converter={StaticResource BoolToVisibility}}">
+                          Visibility="{Binding ShowProtocolList, Converter={StaticResource BoolToVisibility}}">
                 <controls:ProtocolCardList x:Name="ProtocolList" ItemsSource="{Binding RowsView}" Focusable="False"
                                            AutomationProperties.Name="Protocol list" Grid.IsSharedSizeScope="True">
                     <ItemsControl.ItemTemplate>
@@ -753,9 +859,85 @@
                 </controls:ProtocolCardList>
             </ScrollViewer>
 
+            <!-- Ciphers, hashes and key exchange: AlgorithmRowsView, filtered to the current section. -->
+            <DataGrid x:Name="AlgorithmGrid" ItemsSource="{Binding AlgorithmRowsView}" AutoGenerateColumns="False"
+                      Visibility="{Binding ShowAlgorithmTable, Converter={StaticResource BoolToVisibility}}"
+                      CanUserAddRows="False" CanUserDeleteRows="False" CanUserReorderColumns="False" CanUserResizeRows="False"
+                      CanUserSortColumns="True" Sorting="OnAlgorithmGridSorting" HeadersVisibility="Column" GridLinesVisibility="Horizontal"
+                      HorizontalGridLinesBrush="#EAEEF2" BorderThickness="0" Background="Transparent" Margin="1"
+                      SelectionMode="Single" SelectionUnit="FullRow" IsReadOnly="True"
+                      ColumnHeaderStyle="{StaticResource HeaderStyle}" CellStyle="{StaticResource CellStyle}" RowStyle="{StaticResource RowStyle}"
+                      VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto"
+                      EnableRowVirtualization="False">
+                <DataGrid.Columns>
+                    <DataGridTemplateColumn x:Name="AlgorithmNameColumn" Header="Name" Width="3*" MinWidth="240" SortMemberPath="Name"
+                                            CellTemplate="{StaticResource AlgorithmNameTemplate}" />
+                    <DataGridTemplateColumn x:Name="AlgorithmSettingColumn" Header="Enabled  (all connections)" Width="2.6*" MinWidth="250" SortMemberPath="Cell"
+                                            CellTemplate="{StaticResource AlgorithmSettingTemplate}" />
+                    <DataGridTemplateColumn x:Name="AlgorithmSuitesColumn" Header="Cipher suites" Width="1.2*" MinWidth="130" CanUserSort="False"
+                                            CellTemplate="{StaticResource AlgorithmSuitesTemplate}" />
+                    <DataGridTemplateColumn x:Name="AlgorithmResetColumn" Header="" Width="Auto" MinWidth="140" CellTemplate="{StaticResource AlgorithmResetTemplate}" />
+                </DataGrid.Columns>
+            </DataGrid>
+
+            <ScrollViewer x:Name="AlgorithmListScroller" Margin="1" Focusable="False" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"
+                          Visibility="{Binding ShowAlgorithmList, Converter={StaticResource BoolToVisibility}}">
+                <controls:ProtocolCardList x:Name="AlgorithmList" ItemsSource="{Binding AlgorithmRowsView}" Focusable="False"
+                                           AutomationProperties.Name="{Binding SectionNoun}" Grid.IsSharedSizeScope="True">
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate DataType="{x:Type vm:AlgorithmRowViewModel}">
+                            <controls:ProtocolCard x:Name="Item" Background="White" BorderBrush="#EAEEF2" BorderThickness="0,0,0,1" Padding="18,11,18,9"
+                                                   AutomationProperties.Name="{Binding Name}">
+                                <StackPanel>
+                                    <DockPanel>
+                                        <Button DockPanel.Dock="Right" Style="{StaticResource LinkButtonStyle}" Content="Reset to OS default"
+                                                VerticalAlignment="Center" Command="{Binding ResetToOsDefaultCommand}"
+                                                AutomationProperties.Name="{Binding Name, StringFormat='Reset {0} to OS default'}"
+                                                ToolTip="Stage removal of the Enabled value so Windows uses its built-in default." />
+                                        <WrapPanel VerticalAlignment="Center">
+                                            <TextBlock Text="{Binding Name}" FontWeight="SemiBold" FontSize="14" Margin="0,0,8,0" />
+                                            <Border Background="#FFEBE9" CornerRadius="8" Padding="7,1" Margin="0,0,6,0" VerticalAlignment="Center"
+                                                    Visibility="{Binding IsDeprecated, Converter={StaticResource BoolToVisibility}}">
+                                                <TextBlock Text="deprecated" FontSize="11" Foreground="#A40E26" />
+                                            </Border>
+                                            <Border Background="#EAEEF2" CornerRadius="8" Padding="7,1" Margin="0,0,6,0" VerticalAlignment="Center"
+                                                    Visibility="{Binding IsUndocumented, Converter={StaticResource BoolToVisibility}}"
+                                                    ToolTip="Microsoft doesn't document this registry key. Common hardening tools set it, but its effect and OS default are inferred.">
+                                                <TextBlock Text="undocumented key" FontSize="11" Foreground="{StaticResource MutedTextBrush}" />
+                                            </Border>
+                                            <Border Background="#FFF1C2" CornerRadius="8" Padding="7,1" VerticalAlignment="Center"
+                                                    Visibility="{Binding HasPendingChanges, Converter={StaticResource BoolToVisibility}}">
+                                                <TextBlock Text="pending change" FontSize="11" Foreground="#7D4E00" />
+                                            </Border>
+                                        </WrapPanel>
+                                    </DockPanel>
+                                    <TextBlock Text="{Binding Description}" TextWrapping="Wrap" FontSize="11.5" Foreground="{StaticResource MutedTextBrush}"
+                                               Margin="0,2,0,8" />
+                                    <WrapPanel>
+                                        <ContentPresenter Content="{Binding Cell}" ContentTemplate="{StaticResource ListSideTemplate}" />
+                                        <StackPanel Orientation="Horizontal" Margin="0,0,0,4" VerticalAlignment="Top">
+                                            <TextBlock Text="Suites" Foreground="{StaticResource MutedTextBrush}" FontWeight="SemiBold" FontSize="12"
+                                                       VerticalAlignment="Center" Margin="0,5,0,0" />
+                                            <ContentPresenter Content="{Binding}" ContentTemplate="{StaticResource AlgorithmSuitesTemplate}" Margin="0,5,0,0" />
+                                        </StackPanel>
+                                    </WrapPanel>
+                                    <TextBlock Text="{Binding KeySizeText}" TextWrapping="Wrap" FontSize="11.5" Margin="0,2,0,0"
+                                               Visibility="{Binding HasKeySizes, Converter={StaticResource BoolToVisibility}}" />
+                                </StackPanel>
+                            </controls:ProtocolCard>
+                            <DataTemplate.Triggers>
+                                <Trigger SourceName="Item" Property="IsMouseOver" Value="True">
+                                    <Setter TargetName="Item" Property="Background" Value="#F6F8FA" />
+                                </Trigger>
+                            </DataTemplate.Triggers>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </controls:ProtocolCardList>
+            </ScrollViewer>
+
             <StackPanel HorizontalAlignment="Center" VerticalAlignment="Top" Margin="0,80,0,0"
                         Visibility="{Binding HasNoVisibleRows, Converter={StaticResource BoolToVisibility}}">
-                <TextBlock Text="No protocols match the current search and filters." Foreground="{StaticResource MutedTextBrush}" FontSize="14" />
+                <TextBlock Text="{Binding SectionNoun, StringFormat='No {0} match the current search and filters.'}" Foreground="{StaticResource MutedTextBrush}" FontSize="14" />
                 <Button Style="{StaticResource LinkButtonStyle}" Content="Clear filters" HorizontalAlignment="Center" Margin="0,6,0,0"
                         Command="{Binding ClearFiltersCommand}" />
             </StackPanel>

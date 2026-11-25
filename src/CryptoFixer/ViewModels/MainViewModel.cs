@@ -30,14 +30,18 @@ public enum ConnectionState
 public sealed class MainViewModel : ObservableObject, IUpdateHost, IMachineHost
 {
     private const string LocalKey = "\0local";
-    private const string RemoteRestartComment = "CryptoFixer: restarting to apply Schannel protocol changes.";
+    private const string RemoteRestartComment = "CryptoFixer: restarting to apply Schannel changes.";
+
+    private static readonly SchannelSnapshot EmptySnapshot = new([], [], ActiveCipherSuites.Unavailable);
 
     private readonly SchannelTarget _localTarget;
     private readonly RemoteSetup _remote;
     private readonly IDialogService _dialogs;
     private readonly ISystemActions _system;
     private readonly HashSet<string> _restartPending = new(StringComparer.OrdinalIgnoreCase);
-    private IReadOnlyList<ProtocolRoleState> _states = [];
+
+    // The values read from the computer shown (last connect, refresh or apply).
+    private SchannelSnapshot _snapshot = EmptySnapshot;
     private string _statusText = string.Empty;
     private int _pendingCount;
     private bool _closingForUpdate;
@@ -60,7 +64,11 @@ public sealed class MainViewModel : ObservableObject, IUpdateHost, IMachineHost
     private RoleScope _roleScope = RoleScope.Both;
     private ProtocolSortKey _sortKey = ProtocolSortKey.Version;
     private bool _sortDescending;
+    private AlgorithmSortKey _algorithmSortKey = AlgorithmSortKey.Strength;
+    private bool _algorithmSortDescending;
     private int _visibleCount;
+    private int _algorithmVisibleCount;
+    private SettingsSection _section = SettingsSection.Protocols;
 
     private IReadOnlyList<ProtocolPreset> _builtInPresets = [];
     private IReadOnlyList<ProtocolPreset> _userPresets = [];
@@ -102,6 +110,23 @@ public sealed class MainViewModel : ObservableObject, IUpdateHost, IMachineHost
         RowsView.LiveFilteringProperties.Add(nameof(ProtocolRowViewModel.HasPendingChanges));
         ((INotifyCollectionChanged)RowsView).CollectionChanged += (_, _) => UpdateVisibleCount();
 
+        AlgorithmRowsView = new ListCollectionView(AlgorithmRows)
+        {
+            Filter = item => item is AlgorithmRowViewModel row && row.Category == CurrentCategory && _filter.Matches(row.ToView()),
+            CustomSort = new AlgorithmComparer(new AlgorithmRowComparer(_algorithmSortKey, _algorithmSortDescending)),
+            IsLiveFiltering = true,
+        };
+        AlgorithmRowsView.LiveFilteringProperties.Add(nameof(AlgorithmRowViewModel.HasPendingChanges));
+        ((INotifyCollectionChanged)AlgorithmRowsView).CollectionChanged += (_, _) => UpdateVisibleCount();
+
+        Sections =
+        [
+            new(SettingsSection.Protocols, "Protocols", @"SCHANNEL\Protocols: SSL, TLS, DTLS and PCT versions, per server and client side"),
+            new(SettingsSection.Ciphers, "Ciphers", @"SCHANNEL\Ciphers: bulk encryption (NULL, DES, RC2, RC4, Triple DES, AES)"),
+            new(SettingsSection.Hashes, "Hashes", @"SCHANNEL\Hashes: MD5, SHA-1 and SHA-2 message authentication"),
+            new(SettingsSection.KeyExchange, "Key exchange", @"SCHANNEL\KeyExchangeAlgorithms: PKCS (RSA), Diffie-Hellman and ECDH"),
+        ];
+
         RefreshCommand = new RelayCommand(Refresh, () => !IsBusy && !IsConnecting);
         ApplyCommand = new RelayCommand(Apply, () => CanWrite && HasPendingChanges && !IsBusy);
         DiscardCommand = new RelayCommand(Discard, () => HasPendingChanges && !IsBusy);
@@ -110,7 +135,17 @@ public sealed class MainViewModel : ObservableObject, IUpdateHost, IMachineHost
         OpenBackupFolderCommand = new RelayCommand(() => _system.OpenFolder(BackupFolder));
         ClearFiltersCommand = new RelayCommand(ClearFilters, () => IsFilterActive);
         ClearSearchCommand = new RelayCommand(() => SearchText = string.Empty);
-        ToggleSortDirectionCommand = new RelayCommand(() => SortDescending = !SortDescending);
+        ToggleSortDirectionCommand = new RelayCommand(() =>
+        {
+            if (IsProtocolSection)
+            {
+                SortDescending = !SortDescending;
+            }
+            else
+            {
+                AlgorithmSortDescending = !AlgorithmSortDescending;
+            }
+        });
         StagePresetCommand = new RelayCommand<ProtocolPreset>(StagePreset, _ => HasTarget && !IsBusy);
         DeletePresetCommand = new RelayCommand<ProtocolPreset>(DeletePreset, p => !p.IsBuiltIn);
         SavePresetCommand = new RelayCommand(SavePreset, () => HasTarget && !IsBusy);
@@ -120,10 +155,10 @@ public sealed class MainViewModel : ObservableObject, IUpdateHost, IMachineHost
         EditCurrentMachineCommand = new RelayCommand(() => Machines.EditCommand.Execute(_currentMachine), () => IsRemoteTarget && !IsBusy);
         BackToLocalCommand = new RelayCommand(() => TrySwitch(Machines.Local), () => IsRemoteTarget && !IsBusy);
 
-        PopulateRows(localTarget.Store.ReadAll(localTarget.Os.Build));
+        PopulateRows(localTarget.Store.ReadSnapshot(localTarget.Os.Build));
 
         StatusText = CanWrite
-            ? "Choose a setting per protocol and role, or load a preset, then click Apply changes. Nothing is written until you apply."
+            ? "Choose settings for protocols, ciphers, hashes and key exchange, or load a preset, then click Apply changes. Nothing is written until you apply."
             : $"{ReadOnlyReason} Preview mode: you can stage settings and presets to see their effect, but nothing can be applied.";
 
         if (updates.UpdatedFromMessage is not null)
@@ -152,6 +187,12 @@ public sealed class MainViewModel : ObservableObject, IUpdateHost, IMachineHost
 
     /// <summary>Filtered and sorted view of <see cref="Rows"/> that the grid binds to.</summary>
     public ListCollectionView RowsView { get; }
+
+    /// <summary>Ciphers, hashes and key exchange algorithms of the computer shown.</summary>
+    public ObservableCollection<AlgorithmRowViewModel> AlgorithmRows { get; } = [];
+
+    /// <summary>The rows of the selected algorithm section, filtered and sorted.</summary>
+    public ListCollectionView AlgorithmRowsView { get; }
 
     public MachinesViewModel Machines { get; }
 
@@ -189,7 +230,12 @@ public sealed class MainViewModel : ObservableObject, IUpdateHost, IMachineHost
         ? $"OS defaults shown for {OsDefaults.DescribeDefaultsFamily(target.Os.Build)}"
         : _currentMachine.Details;
 
-    public string RegistryPath => _target?.RegistryPath ?? $@"\\{_currentMachine.Host}\HKEY_LOCAL_MACHINE\{SchannelPaths.Protocols}";
+    /// <summary>The registry folder of the selected section, e.g. HKEY_LOCAL_MACHINE\...\SCHANNEL\Ciphers.</summary>
+    public string RegistryPath => $@"{SchannelRegistryPath}\{SectionFolder}";
+
+    private string SchannelRegistryPath => _target?.RegistryPath ?? $@"\\{_currentMachine.Host}\HKEY_LOCAL_MACHINE\{SchannelPaths.Schannel}";
+
+    private string SectionFolder => CurrentCategory is { } category ? AlgorithmCatalog.FolderName(category) : "Protocols";
 
     // ---- Machine shown ----
 
@@ -342,18 +388,82 @@ public sealed class MainViewModel : ObservableObject, IUpdateHost, IMachineHost
         CommandManager.InvalidateRequerySuggested();
     }
 
+    // ---- Sections ----
+
+    /// <summary>Protocols, Ciphers, Hashes and Key exchange; each label shows its number of pending changes.</summary>
+    public IReadOnlyList<SectionOption> Sections { get; }
+
+    public SettingsSection Section
+    {
+        get => _section;
+        set
+        {
+            if (!Enum.IsDefined(value) || !SetProperty(ref _section, value))
+            {
+                return;
+            }
+
+            OnPropertyChanged(nameof(IsProtocolSection));
+            OnPropertyChanged(nameof(IsAlgorithmSection));
+            OnPropertyChanged(nameof(SectionNoun));
+            OnPropertyChanged(nameof(SearchPlaceholder));
+            OnPropertyChanged(nameof(RegistryPath));
+            OnPropertyChanged(nameof(SortDirectionGlyph));
+            OnPropertyChanged(nameof(SortDirectionToolTip));
+            OnPropertyChanged(nameof(SectionHint));
+            RaiseLayoutVisibility();
+            ApplyView();
+        }
+    }
+
+    public bool IsProtocolSection => Section == SettingsSection.Protocols;
+
+    public bool IsAlgorithmSection => !IsProtocolSection;
+
+    /// <summary>The algorithm category shown, or null for the protocols section.</summary>
+    public AlgorithmCategory? CurrentCategory => Section switch
+    {
+        SettingsSection.Ciphers => AlgorithmCategory.Cipher,
+        SettingsSection.Hashes => AlgorithmCategory.Hash,
+        SettingsSection.KeyExchange => AlgorithmCategory.KeyExchange,
+        _ => null,
+    };
+
+    /// <summary>Plural noun for counts and empty-state text, e.g. "ciphers".</summary>
+    public string SectionNoun => Section switch
+    {
+        SettingsSection.Ciphers => "ciphers",
+        SettingsSection.Hashes => "hashes",
+        SettingsSection.KeyExchange => "key exchange algorithms",
+        _ => "protocols",
+    };
+
+    public string SearchPlaceholder => $"Search {SectionNoun}";
+
+    /// <summary>One-line explanation shown above the algorithm table.</summary>
+    public string SectionHint => Section switch
+    {
+        SettingsSection.Ciphers =>
+            "Enabled = 0xffffffff allows a cipher, 0 blocks it everywhere in Schannel. A cipher is only used if a suite in the cipher suite list uses it. * = default inferred from Microsoft's suite tables.",
+        SettingsSection.Hashes =>
+            "Blocking a hash disables every cipher suite that uses it for message authentication. * = Microsoft doesn't document this key.",
+        SettingsSection.KeyExchange =>
+            "Blocking a key exchange disables every cipher suite that uses it. Diffie-Hellman and PKCS key sizes are shown read-only. * = undocumented key.",
+        _ => string.Empty,
+    };
+
     // ---- Filtering and sorting ----
 
     public IReadOnlyList<Choice<ProtocolStateFilter>> StateFilterOptions { get; } =
     [
-        new(ProtocolStateFilter.All, "All protocols"),
+        new(ProtocolStateFilter.All, "All"),
         new(ProtocolStateFilter.Enabled, "Enabled"),
         new(ProtocolStateFilter.Disabled, "Disabled"),
         new(ProtocolStateFilter.NotSupported, "Not supported"),
         new(ProtocolStateFilter.SetInRegistry, "Set in registry"),
         new(ProtocolStateFilter.OsDefault, "Using OS default"),
         new(ProtocolStateFilter.PendingChanges, "Pending changes"),
-        new(ProtocolStateFilter.Deprecated, "Deprecated protocols"),
+        new(ProtocolStateFilter.Deprecated, "Deprecated"),
     ];
 
     public IReadOnlyList<Choice<RoleScope>> RoleScopeOptions { get; } =
@@ -371,6 +481,14 @@ public sealed class MainViewModel : ObservableObject, IUpdateHost, IMachineHost
         new(ProtocolSortKey.ClientState, "Client state"),
         new(ProtocolSortKey.ServerSource, "Server: set in registry first"),
         new(ProtocolSortKey.ClientSource, "Client: set in registry first"),
+    ];
+
+    public IReadOnlyList<Choice<AlgorithmSortKey>> AlgorithmSortOptions { get; } =
+    [
+        new(AlgorithmSortKey.Strength, "Strength (weakest first)"),
+        new(AlgorithmSortKey.Name, "Name"),
+        new(AlgorithmSortKey.State, "State"),
+        new(AlgorithmSortKey.Source, "Set in registry first"),
     ];
 
     public string SearchText
@@ -424,21 +542,42 @@ public sealed class MainViewModel : ObservableObject, IUpdateHost, IMachineHost
         set => SetSort(SortKey, value);
     }
 
-    public string SortDirectionGlyph => SortDescending ? "↓" : "↑";
+    public AlgorithmSortKey AlgorithmSortKey
+    {
+        get => _algorithmSortKey;
+        set => SetAlgorithmSort(value, AlgorithmSortDescending);
+    }
 
-    public string SortDirectionToolTip => SortDescending ? "Descending (click for ascending)" : "Ascending (click for descending)";
+    public bool AlgorithmSortDescending
+    {
+        get => _algorithmSortDescending;
+        set => SetAlgorithmSort(AlgorithmSortKey, value);
+    }
+
+    private bool CurrentSortDescending => IsProtocolSection ? SortDescending : AlgorithmSortDescending;
+
+    public string SortDirectionGlyph => CurrentSortDescending ? "↓" : "↑";
+
+    public string SortDirectionToolTip => CurrentSortDescending ? "Descending (click for ascending)" : "Ascending (click for descending)";
 
     public bool ShowServerColumn => RoleScope != RoleScope.Client;
 
     public bool ShowClientColumn => RoleScope != RoleScope.Server;
 
-    public bool IsFilterActive => _filter.IsActive;
+    /// <summary>A filter that affects the section shown (the Side filter only applies to protocols).</summary>
+    public bool IsFilterActive => IsProtocolSection
+        ? _filter.IsActive
+        : !string.IsNullOrWhiteSpace(SearchText) || StateFilter != ProtocolStateFilter.All;
 
-    public bool HasNoVisibleRows => Rows.Count > 0 && _visibleCount == 0;
+    private int SectionTotal => CurrentCategory is { } category ? AlgorithmRows.Count(r => r.Category == category) : Rows.Count;
+
+    private int SectionVisible => IsProtocolSection ? _visibleCount : _algorithmVisibleCount;
+
+    public bool HasNoVisibleRows => SectionTotal > 0 && SectionVisible == 0;
 
     public string VisibleCountText => IsFilterActive
-        ? $"Showing {_visibleCount} of {Rows.Count} protocols"
-        : $"{Rows.Count} protocols";
+        ? $"Showing {SectionVisible} of {SectionTotal} {SectionNoun}"
+        : $"{SectionTotal} {SectionNoun}";
 
     // ---- Display mode ----
 
@@ -464,6 +603,7 @@ public sealed class MainViewModel : ObservableObject, IUpdateHost, IMachineHost
             OnPropertyChanged();
             OnPropertyChanged(nameof(IsListMode));
             OnPropertyChanged(nameof(IsTableMode));
+            RaiseLayoutVisibility();
             SaveSettings();
         }
     }
@@ -471,6 +611,22 @@ public sealed class MainViewModel : ObservableObject, IUpdateHost, IMachineHost
     public bool IsListMode => DisplayMode == TableDisplayMode.List;
 
     public bool IsTableMode => !IsListMode;
+
+    public bool ShowProtocolTable => IsProtocolSection && IsTableMode;
+
+    public bool ShowProtocolList => IsProtocolSection && IsListMode;
+
+    public bool ShowAlgorithmTable => IsAlgorithmSection && IsTableMode;
+
+    public bool ShowAlgorithmList => IsAlgorithmSection && IsListMode;
+
+    private void RaiseLayoutVisibility()
+    {
+        OnPropertyChanged(nameof(ShowProtocolTable));
+        OnPropertyChanged(nameof(ShowProtocolList));
+        OnPropertyChanged(nameof(ShowAlgorithmTable));
+        OnPropertyChanged(nameof(ShowAlgorithmList));
+    }
 
     /// <summary>Whether to look for a new release in the background at startup; remembered in the settings file.</summary>
     public bool CheckForUpdatesAtStartup
@@ -564,6 +720,9 @@ public sealed class MainViewModel : ObservableObject, IUpdateHost, IMachineHost
             .OfType<PendingChange>()
             .ToList();
 
+    public IReadOnlyList<AlgorithmChange> GetAlgorithmChanges() =>
+        AlgorithmRows.Select(r => r.Cell.ToChange()).OfType<AlgorithmChange>().ToList();
+
     /// <summary>Returns false if the user cancelled closing because of pending changes.</summary>
     public bool ConfirmClose() =>
         _closingForUpdate || !CanWrite || !HasPendingChanges ||
@@ -614,12 +773,50 @@ public sealed class MainViewModel : ObservableObject, IUpdateHost, IMachineHost
         OnPropertyChanged(nameof(SortDirectionToolTip));
     }
 
+    /// <summary>Algorithm column header click: ascending, then descending, then back to strength order.</summary>
+    public void SortAlgorithmsByColumn(AlgorithmSortKey key)
+    {
+        if (AlgorithmSortKey != key)
+        {
+            SetAlgorithmSort(key, descending: false);
+        }
+        else if (!AlgorithmSortDescending)
+        {
+            SetAlgorithmSort(key, descending: true);
+        }
+        else
+        {
+            SetAlgorithmSort(AlgorithmSortKey.Strength, descending: false);
+        }
+    }
+
+    private void SetAlgorithmSort(AlgorithmSortKey key, bool descending)
+    {
+        if (key == _algorithmSortKey && descending == _algorithmSortDescending)
+        {
+            return;
+        }
+
+        _algorithmSortKey = key;
+        _algorithmSortDescending = descending;
+        ApplyView();
+        OnPropertyChanged(nameof(AlgorithmSortKey));
+        OnPropertyChanged(nameof(AlgorithmSortDescending));
+        OnPropertyChanged(nameof(SortDirectionGlyph));
+        OnPropertyChanged(nameof(SortDirectionToolTip));
+    }
+
     private void ApplyView()
     {
         _filter = new ProtocolFilter(SearchText, StateFilter, RoleScope);
         using (RowsView.DeferRefresh())
         {
             RowsView.CustomSort = new RowComparer(new ProtocolRowComparer(SortKey, SortDescending));
+        }
+
+        using (AlgorithmRowsView.DeferRefresh())
+        {
+            AlgorithmRowsView.CustomSort = new AlgorithmComparer(new AlgorithmRowComparer(AlgorithmSortKey, AlgorithmSortDescending));
         }
 
         OnPropertyChanged(nameof(IsFilterActive));
@@ -629,6 +826,7 @@ public sealed class MainViewModel : ObservableObject, IUpdateHost, IMachineHost
     private void UpdateVisibleCount()
     {
         _visibleCount = RowsView.Count;
+        _algorithmVisibleCount = AlgorithmRowsView?.Count ?? 0;
         OnPropertyChanged(nameof(VisibleCountText));
         OnPropertyChanged(nameof(HasNoVisibleRows));
     }
@@ -658,9 +856,10 @@ public sealed class MainViewModel : ObservableObject, IUpdateHost, IMachineHost
         ApplyView();
     }
 
-    private void PopulateRows(IReadOnlyList<ProtocolRoleState> states)
+    private void PopulateRows(SchannelSnapshot snapshot)
     {
-        _states = states;
+        _snapshot = snapshot;
+        var states = snapshot.Protocols;
         Rows.Clear();
         foreach (var protocol in ProtocolCatalog.All)
         {
@@ -672,6 +871,12 @@ public sealed class MainViewModel : ObservableObject, IUpdateHost, IMachineHost
                 new ProtocolCellViewModel(client, OnCellChanged)));
         }
 
+        AlgorithmRows.Clear();
+        foreach (var state in snapshot.Algorithms)
+        {
+            AlgorithmRows.Add(new AlgorithmRowViewModel(new AlgorithmCellViewModel(state, OnCellChanged), snapshot.CipherSuites));
+        }
+
         BuiltInPresetList = BuiltInPresets.For(states);
         OnCellChanged();
         UpdateVisibleCount();
@@ -679,8 +884,9 @@ public sealed class MainViewModel : ObservableObject, IUpdateHost, IMachineHost
 
     private void ClearRows()
     {
-        _states = [];
+        _snapshot = EmptySnapshot;
         Rows.Clear();
+        AlgorithmRows.Clear();
         BuiltInPresetList = [];
         OnCellChanged();
         UpdateVisibleCount();
@@ -688,7 +894,20 @@ public sealed class MainViewModel : ObservableObject, IUpdateHost, IMachineHost
 
     private void OnCellChanged()
     {
-        PendingCount = GetPendingChanges().Count;
+        var protocolChanges = GetPendingChanges().Count;
+        var algorithmChanges = GetAlgorithmChanges();
+        foreach (var section in Sections)
+        {
+            section.PendingCount = section.Value switch
+            {
+                SettingsSection.Protocols => protocolChanges,
+                SettingsSection.Ciphers => algorithmChanges.Count(c => c.Algorithm.Category == AlgorithmCategory.Cipher),
+                SettingsSection.Hashes => algorithmChanges.Count(c => c.Algorithm.Category == AlgorithmCategory.Hash),
+                _ => algorithmChanges.Count(c => c.Algorithm.Category == AlgorithmCategory.KeyExchange),
+            };
+        }
+
+        PendingCount = protocolChanges + algorithmChanges.Count;
         CommandManager.InvalidateRequerySuggested();
     }
 
@@ -718,7 +937,7 @@ public sealed class MainViewModel : ObservableObject, IUpdateHost, IMachineHost
         if (_target is { IsLocal: false })
         {
             // Restore the values read when connecting or last refreshing, without another round trip.
-            PopulateRows(_states);
+            PopulateRows(_snapshot);
         }
         else if (!await TryReloadAsync())
         {
@@ -738,13 +957,13 @@ public sealed class MainViewModel : ObservableObject, IUpdateHost, IMachineHost
 
         try
         {
-            var states = await RunAsync(target, $"Reading the Schannel settings of {TargetName}…", () => target.Store.ReadAll(target.Os.Build));
+            var snapshot = await RunAsync(target, $"Reading the Schannel settings of {TargetName}…", () => target.Store.ReadSnapshot(target.Os.Build));
             if (!ReferenceEquals(target, _target))
             {
                 return false;
             }
 
-            PopulateRows(states);
+            PopulateRows(snapshot);
             return true;
         }
         catch (Exception ex) when (!target.IsLocal)
@@ -876,7 +1095,7 @@ public sealed class MainViewModel : ObservableObject, IUpdateHost, IMachineHost
             _target = _localTarget;
             ConnectionState = ConnectionState.Ready;
             RaiseTargetChanged();
-            PopulateRows(_localTarget.Store.ReadAll(_localTarget.Os.Build));
+            PopulateRows(_localTarget.Store.ReadSnapshot(_localTarget.Os.Build));
             StatusText = $"Showing this computer ({_localTarget.HostName}).";
             return;
         }
@@ -894,15 +1113,15 @@ public sealed class MainViewModel : ObservableObject, IUpdateHost, IMachineHost
         StatusText = ConnectionMessage;
 
         IRemoteSession session;
-        IReadOnlyList<ProtocolRoleState> states;
+        SchannelSnapshot snapshot;
         try
         {
-            (session, states) = await Task.Run(() =>
+            (session, snapshot) = await Task.Run(() =>
             {
                 var opened = _remote.Connector.Connect(entry, password, readOnly, cancellation.Token);
                 try
                 {
-                    return (opened, new SchannelProtocolStore(opened.Registry).ReadAll(opened.Os.Build));
+                    return (opened, new SchannelProtocolStore(opened.Registry).ReadSnapshot(opened.Os.Build));
                 }
                 catch
                 {
@@ -937,7 +1156,7 @@ public sealed class MainViewModel : ObservableObject, IUpdateHost, IMachineHost
         machine.SetStatus(MachineStatus.Connected, $"Connected at {DateTime.Now:T} · {session.Os.Summary}");
         ConnectionState = ConnectionState.Ready;
         RaiseTargetChanged();
-        PopulateRows(states);
+        PopulateRows(snapshot);
         StatusText = CanWrite
             ? $"Connected to {entry.Name} ({entry.Host}). Stage changes, then click Apply changes; nothing is written until you apply."
             : $"Connected to {entry.Name} ({entry.Host}) read-only. {ReadOnlyReason}";
@@ -999,7 +1218,7 @@ public sealed class MainViewModel : ObservableObject, IUpdateHost, IMachineHost
             return;
         }
 
-        var plan = PresetPlanner.Plan(preset, _states);
+        var plan = PresetPlanner.Plan(preset, _snapshot.Protocols, _snapshot.Algorithms);
         var changed = 0;
         foreach (var target in plan.Targets)
         {
@@ -1007,6 +1226,15 @@ public sealed class MainViewModel : ObservableObject, IUpdateHost, IMachineHost
             if (cell.Selected != target.Target)
             {
                 cell.Selected = target.Target;
+                changed++;
+            }
+        }
+
+        foreach (var target in plan.AlgorithmTargets)
+        {
+            if (AlgorithmRows.FirstOrDefault(r => r.Algorithm == target.Algorithm) is { } row && row.Cell.Selected != target.Target)
+            {
+                row.Cell.Selected = target.Target;
                 changed++;
             }
         }
@@ -1021,7 +1249,16 @@ public sealed class MainViewModel : ObservableObject, IUpdateHost, IMachineHost
             message.Append($" Skipped {string.Join("; ", plan.Skipped)}.");
         }
 
-        if (IsFilterActive && Rows.Any(r => r.HasPendingChanges && !_filter.Matches(r.ToView())))
+        var otherSections = Sections.Where(s => s.Value != Section && s.PendingCount > 0).Select(s => s.Title).ToList();
+        if (otherSections.Count > 0)
+        {
+            message.Append($" Pending changes in other sections: {string.Join(", ", otherSections)}.");
+        }
+
+        var hidden = IsProtocolSection
+            ? Rows.Any(r => r.HasPendingChanges && !_filter.Matches(r.ToView()))
+            : AlgorithmRows.Any(r => r.Category == CurrentCategory && r.HasPendingChanges && !_filter.Matches(r.ToView()));
+        if (IsFilterActive && hidden)
         {
             message.Append(" Some rows with pending changes are hidden by the current filter.");
         }
@@ -1082,7 +1319,8 @@ public sealed class MainViewModel : ObservableObject, IUpdateHost, IMachineHost
         var settings = Rows
             .SelectMany(r => new[] { r.Server, r.Client })
             .Select(c => new PresetEntry(c.State.Protocol, c.State.Role, c.Selected));
-        var preset = ProtocolPreset.Capture(details.Name, details.Description, settings, DateTimeOffset.Now, $"{TargetLabel}, {target.Os.Summary}", out var skipped);
+        var algorithms = AlgorithmRows.Select(r => new AlgorithmPresetEntry(r.Algorithm, r.Cell.Selected));
+        var preset = ProtocolPreset.Capture(details.Name, details.Description, settings, algorithms, DateTimeOffset.Now, $"{TargetLabel}, {target.Os.Summary}", out var skipped);
 
         var presets = UserPresets.ToList();
         var index = existing is null ? -1 : presets.IndexOf(existing);
@@ -1100,7 +1338,7 @@ public sealed class MainViewModel : ObservableObject, IUpdateHost, IMachineHost
             return;
         }
 
-        StatusText = $"Saved preset \"{preset.Name}\" ({preset.Entries.Count} settings) to {PresetsPath}." +
+        StatusText = $"Saved preset \"{preset.Name}\" ({preset.Entries.Count} protocol and {preset.Algorithms.Count} cipher, hash and key exchange settings) to {PresetsPath}." +
                      (skipped.Count > 0 ? $" {skipped.Count} custom value(s) can't be stored in a preset and were left out." : string.Empty);
     }
 
@@ -1186,19 +1424,23 @@ public sealed class MainViewModel : ObservableObject, IUpdateHost, IMachineHost
 
     private async void Apply()
     {
-        var changes = GetPendingChanges();
-        if (changes.Count == 0 || !CanWrite || _target is not { } target)
+        var protocolChanges = GetPendingChanges();
+        var algorithmChanges = GetAlgorithmChanges();
+        var count = protocolChanges.Count + algorithmChanges.Count;
+        if (count == 0 || !CanWrite || _target is not { } target)
         {
             return;
         }
 
         var remote = !target.IsLocal;
         var label = TargetLabel;
-        var warnings = ChangeAdvisor.GetWarnings(_states, changes);
+        var warnings = ChangeAdvisor.GetWarnings(_snapshot.Protocols, protocolChanges)
+            .Concat(ChangeAdvisor.GetWarnings(_snapshot.Algorithms, algorithmChanges))
+            .ToList();
         var message = new StringBuilder();
-        message.AppendLine($"Write {changes.Count} change(s) to {RegistryPath}?");
+        message.AppendLine($"Write {count} change(s) to {target.RegistryPath}?");
         message.AppendLine();
-        foreach (var change in changes)
+        foreach (var change in protocolChanges.Select(c => c.ToString()).Concat(algorithmChanges.Select(c => c.ToString())))
         {
             message.AppendLine($"  • {change}");
         }
@@ -1241,7 +1483,11 @@ public sealed class MainViewModel : ObservableObject, IUpdateHost, IMachineHost
 
         try
         {
-            await RunAsync(target, $"Writing {changes.Count} change(s) to {TargetName}…", () => target.Store.Apply(changes));
+            await RunAsync(target, $"Writing {count} change(s) to {TargetName}…", () =>
+            {
+                target.Store.Apply(protocolChanges);
+                target.Store.Apply(algorithmChanges);
+            });
         }
         catch (Exception ex)
         {
@@ -1257,8 +1503,8 @@ public sealed class MainViewModel : ObservableObject, IUpdateHost, IMachineHost
         var reloaded = await TryReloadAsync();
         MarkRestartRequired(true);
         StatusText = remote
-            ? $"Applied {changes.Count} change(s) to {label}. Backup saved to {backupPath}. Restart {TargetName} to activate the changes."
-            : $"Applied {changes.Count} change(s). Backup saved to {backupPath}. Restart Windows to activate the changes.";
+            ? $"Applied {count} change(s) to {label}. Backup saved to {backupPath}. Restart {TargetName} to activate the changes."
+            : $"Applied {count} change(s). Backup saved to {backupPath}. Restart Windows to activate the changes.";
 
         if (!reloaded || !ReferenceEquals(target, _target))
         {
@@ -1268,16 +1514,16 @@ public sealed class MainViewModel : ObservableObject, IUpdateHost, IMachineHost
         if (remote)
         {
             if (_dialogs.Confirm("Restart required",
-                    $"{changes.Count} change(s) were applied to {label}.\nBackup (on this PC): {backupPath}\n\n" +
-                    $"Schannel only picks up protocol changes after a restart. Restart {label} now?\n\n" +
+                    $"{count} change(s) were applied to {label}.\nBackup (on this PC): {backupPath}\n\n" +
+                    $"Schannel only picks up these changes after a restart. Restart {label} now?\n\n" +
                     "It restarts about 10 seconds after you confirm; users and services on it are disconnected."))
             {
                 await RestartRemoteAsync(target);
             }
         }
         else if (_dialogs.Confirm("Restart required",
-                     $"{changes.Count} change(s) were applied.\nBackup: {backupPath}\n\n" +
-                     "Schannel only picks up protocol changes after a restart. Restart Windows now?"))
+                     $"{count} change(s) were applied.\nBackup: {backupPath}\n\n" +
+                     "Schannel only picks up these changes after a restart. Restart Windows now?"))
         {
             _system.RestartComputer();
         }
@@ -1375,18 +1621,24 @@ public sealed class MainViewModel : ObservableObject, IUpdateHost, IMachineHost
             Directory.CreateDirectory(directory);
         }
 
-        var content = RegFileExporter.ExportProtocols(target.Store.Registry, DateTimeOffset.Now, label, isRemote: !target.IsLocal);
+        var content = RegFileExporter.Export(target.Store.Registry, DateTimeOffset.Now, label, isRemote: !target.IsLocal);
         RegFileExporter.WriteFile(path, content);
         return path;
     }
 
     private static string DefaultBackupFileName(SchannelTarget target) =>
-        $"Schannel-Protocols-{target.FileNameHost}-{DateTime.Now:yyyyMMdd-HHmmss}.reg";
+        $"Schannel-{target.FileNameHost}-{DateTime.Now:yyyyMMdd-HHmmss}.reg";
 
     private sealed class RowComparer(ProtocolRowComparer inner) : IComparer
     {
         public int Compare(object? x, object? y) =>
             inner.Compare((x as ProtocolRowViewModel)?.ToView(), (y as ProtocolRowViewModel)?.ToView());
+    }
+
+    private sealed class AlgorithmComparer(AlgorithmRowComparer inner) : IComparer
+    {
+        public int Compare(object? x, object? y) =>
+            inner.Compare((x as AlgorithmRowViewModel)?.ToView(), (y as AlgorithmRowViewModel)?.ToView());
     }
 }
 
@@ -1414,9 +1666,18 @@ public static class PresetText
             text.AppendLine($"{group.Key.KeyName}: {value}");
         }
 
-        if (preset.Entries.Count == 0)
+        foreach (var category in preset.Algorithms.GroupBy(a => a.Algorithm.Category))
         {
-            text.AppendLine("(no protocol settings)");
+            // Compact: "Ciphers: disabled NULL, DES 56/56, …; enabled AES 128/128, AES 256/256".
+            var parts = category
+                .GroupBy(a => a.Setting)
+                .Select(g => $"{Label(g.Key)} {string.Join(", ", g.Select(a => a.Algorithm.KeyName))}");
+            text.AppendLine($"{AlgorithmCatalog.Title(category.Key)}: {string.Join("; ", parts)}");
+        }
+
+        if (preset.Entries.Count == 0 && preset.Algorithms.Count == 0)
+        {
+            text.AppendLine("(no settings)");
         }
 
         if (preset.SavedAt is not null || preset.SavedFrom is not null)
@@ -1433,7 +1694,7 @@ public static class PresetText
             }
         }
 
-        text.AppendLine().AppendLine().Append("Loading only stages these settings; protocols not listed are left unchanged.");
+        text.AppendLine().AppendLine().Append("Loading only stages these settings; anything not listed is left unchanged.");
         return text.ToString().Trim();
     }
 

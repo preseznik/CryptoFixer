@@ -45,6 +45,68 @@ public sealed record ProtocolRowView(
     public bool IsPending(ProtocolRole role) => role == ProtocolRole.Server ? ServerPending : ClientPending;
 }
 
+public enum AlgorithmSortKey
+{
+    /// <summary>Catalog order: weakest first.</summary>
+    Strength,
+    Name,
+    State,
+    Source,
+}
+
+/// <summary>Snapshot of one cipher, hash or key exchange row used for filtering and sorting.</summary>
+public sealed record AlgorithmRowView(AlgorithmState State, bool Pending = false)
+{
+    public SchannelAlgorithm Algorithm => State.Algorithm;
+}
+
+/// <summary>Sorts algorithm rows; ties are broken by catalog order (weakest first).</summary>
+public sealed class AlgorithmRowComparer(AlgorithmSortKey key, bool descending = false) : IComparer<AlgorithmRowView>
+{
+    public AlgorithmSortKey Key { get; } = key;
+
+    public bool Descending { get; } = descending;
+
+    public int Compare(AlgorithmRowView? x, AlgorithmRowView? y)
+    {
+        if (ReferenceEquals(x, y))
+        {
+            return 0;
+        }
+
+        if (x is null || y is null)
+        {
+            return x is null ? -1 : 1;
+        }
+
+        var primary = Key switch
+        {
+            AlgorithmSortKey.Strength => Index(x).CompareTo(Index(y)),
+            AlgorithmSortKey.Name => string.Compare(x.Algorithm.KeyName, y.Algorithm.KeyName, StringComparison.OrdinalIgnoreCase),
+            AlgorithmSortKey.State => Rank(x.State.Effective).CompareTo(Rank(y.State.Effective)),
+            AlgorithmSortKey.Source => (x.State.IsExplicitlyConfigured ? 0 : 1).CompareTo(y.State.IsExplicitlyConfigured ? 0 : 1),
+            _ => 0,
+        };
+
+        if (Descending)
+        {
+            primary = -primary;
+        }
+
+        return primary != 0 ? primary : Index(x).CompareTo(Index(y));
+    }
+
+    private static int Index(AlgorithmRowView row) => AlgorithmCatalog.IndexOf(row.Algorithm) is var i and >= 0 ? i : int.MaxValue;
+
+    private static int Rank(EffectiveState state) => state switch
+    {
+        EffectiveState.Enabled => 0,
+        EffectiveState.EnabledOnRequestOnly => 1,
+        EffectiveState.Disabled => 2,
+        _ => 3,
+    };
+}
+
 public sealed record ProtocolFilter(string? SearchText = null, ProtocolStateFilter State = ProtocolStateFilter.All, RoleScope Roles = RoleScope.Both)
 {
     public bool IsActive => !string.IsNullOrWhiteSpace(SearchText) || State != ProtocolStateFilter.All || Roles != RoleScope.Both;
@@ -59,18 +121,43 @@ public sealed record ProtocolFilter(string? SearchText = null, ProtocolStateFilt
     public bool Matches(ProtocolRowView row)
     {
         ArgumentNullException.ThrowIfNull(row);
-        return MatchesText(row.Protocol) && MatchesState(row);
+        return MatchesText(row.Protocol.KeyName, row.Protocol.Description, row.Protocol.IsDeprecated) && MatchesState(row);
+    }
+
+    /// <summary>Filters a cipher, hash or key exchange row. <see cref="Roles"/> doesn't apply: algorithms have no sides.</summary>
+    public bool Matches(AlgorithmRowView row)
+    {
+        ArgumentNullException.ThrowIfNull(row);
+        var algorithm = row.Algorithm;
+        if (!MatchesText(algorithm.KeyName, algorithm.Description, algorithm.IsDeprecated))
+        {
+            return false;
+        }
+
+        var state = row.State;
+        return State switch
+        {
+            ProtocolStateFilter.All => true,
+            ProtocolStateFilter.Deprecated => algorithm.IsDeprecated,
+            ProtocolStateFilter.Enabled => state.Effective == EffectiveState.Enabled,
+            ProtocolStateFilter.Disabled => state.Effective == EffectiveState.Disabled,
+            ProtocolStateFilter.NotSupported => state.Effective == EffectiveState.NotSupported,
+            ProtocolStateFilter.SetInRegistry => state.IsExplicitlyConfigured,
+            ProtocolStateFilter.OsDefault => !state.IsExplicitlyConfigured,
+            ProtocolStateFilter.PendingChanges => row.Pending,
+            _ => true,
+        };
     }
 
     /// <summary>Every whitespace-separated term must occur in the name or description ("tls1.2" also matches "TLS 1.2").</summary>
-    private bool MatchesText(SchannelProtocol protocol)
+    private bool MatchesText(string name, string description, bool isDeprecated)
     {
         if (string.IsNullOrWhiteSpace(SearchText))
         {
             return true;
         }
 
-        var haystack = $"{protocol.KeyName} {protocol.Description}{(protocol.IsDeprecated ? " deprecated" : string.Empty)}";
+        var haystack = $"{name} {description}{(isDeprecated ? " deprecated" : string.Empty)}";
         var compact = haystack.Replace(" ", string.Empty, StringComparison.Ordinal);
         return SearchText
             .Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries)
